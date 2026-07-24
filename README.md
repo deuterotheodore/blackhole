@@ -1,4 +1,4 @@
-#Black hole simulation in javascript (three.js, WebGL)
+# Black hole simulation in javascript (three.js, WebGL)
 
 ![Screenshot](screens/slide1.jpg)
 ![Screenshot](screens/slide2.jpg)
