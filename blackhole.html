@@ -1,0 +1,3694 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Black Hole Simulation (prototype)</title>
+<style>
+  html, body {
+    margin: 0; padding: 0; overflow: hidden;
+    background: #05060a;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    color: #cfd6e6;
+  }
+  #sceneContainer { position: absolute; inset: 0; }
+  canvas { display: block; cursor: grab; }
+  canvas:active { cursor: grabbing; }
+
+  /* ---------- side panel shell ---------------------------------------- */
+  #sidepanel {
+    position: absolute; top: 14px; left: 14px;
+    width: 262px;
+    /* definite height, NOT max-height: a flex column can only hand a
+       resolvable height down to its children if it has one itself */
+    height: calc(100vh - 28px);
+    display: flex; flex-direction: column; gap: 8px;
+    align-items: stretch;
+    z-index: 10;
+    font-size: 12px;
+    pointer-events: none;            /* let clicks through the empty gap */
+  }
+  #sidepanel > * { pointer-events: auto; }
+
+  .sidepanel-item {
+    background: rgba(10, 12, 20, 0.72);
+    border: 1px solid rgba(255, 179, 71, 0.18);
+    border-radius: 10px;
+    backdrop-filter: blur(6px);
+    overflow: hidden;                 /* keeps the rounded corners honest */
+    display: flex; flex-direction: column;
+    min-height: 0;
+    flex: 1 1 0;                      /* expanded: share the leftover height */
+  }
+  /* collapsed: shrink to the summary row */
+  .sidepanel-item:has(> .sp-toggle:not(:checked)) { flex: 0 0 auto; }
+
+  .sp-toggle {                        /* visually gone, still focusable */
+    position: absolute; opacity: 0;
+    width: 1px; height: 1px; margin: 0; pointer-events: none;
+  }
+
+  .sp-summary {
+    cursor: pointer; user-select: none;
+    padding: 8px 10px;
+    font-size: 12px; font-weight: 600;
+    letter-spacing: 0.06em; text-transform: uppercase;
+    color: #ffb347;
+    display: flex; align-items: center; gap: 7px;
+    flex: 0 0 auto;
+  }
+  .sp-summary::before {
+    content: "\25b8";
+    font-size: 10px; line-height: 1;
+    transition: transform 0.15s ease;
+    color: rgba(255, 179, 71, 0.7);
+  }
+  .sp-toggle:checked ~ .sp-summary::before { transform: rotate(90deg); }
+  .sp-summary:hover { background: rgba(255, 179, 71, 0.08); }
+  .sp-toggle:focus-visible ~ .sp-summary { outline: 1px solid #ffb347; outline-offset: -2px; }
+
+  /* the scrolling body of each item */
+  .sidepanel-body {
+    padding: 2px 10px 10px 10px;
+    overflow-y: auto;
+    overflow-x: hidden;
+    min-height: 0;
+    flex: 1 1 0;
+  }
+  .sp-toggle:not(:checked) ~ .sidepanel-body { display: none; }
+  .sidepanel-body::-webkit-scrollbar { width: 8px; }
+  .sidepanel-body::-webkit-scrollbar-thumb {
+    background: rgba(255, 179, 71, 0.25); border-radius: 4px;
+  }
+
+  /* ---------- controls ------------------------------------------------ */
+  .subpanel {
+    background: rgba(10, 42, 20, 0.3);
+    border: 1px solid rgba(179, 255, 71, 0.18);
+    border-radius: 6px;
+    padding: 8px;
+    margin: 8px 0;
+  }
+  .row { margin-bottom: 10px; }
+  .row label {
+    display: flex; justify-content: space-between;
+    margin-bottom: 3px; color: #8b93a8;
+  }
+  .row output { color: #e8ecf5; font-variant-numeric: tabular-nums; }
+  input[type="range"] { width: 100%; accent-color: #ffb347; }
+  .checkrow { display: flex; align-items: center; gap: 6px; margin-bottom: 8px; }
+  button {
+    width: 100%; padding: 7px; margin-top: 4px;
+    background: rgba(255, 179, 71, 0.12);
+    border: 1px solid rgba(255, 179, 71, 0.35);
+    color: #ffb347; border-radius: 6px; font-size: 12px;
+    cursor: pointer;
+  }
+  button:hover { background: rgba(255, 179, 71, 0.22); }
+
+  /* ---------- stats table --------------------------------------------- */
+  #stats {
+    font-size: 11px;
+    line-height: 1.35;
+    color: #6b7385;
+  }
+  #stats table { width: 100%; border-collapse: collapse; }
+  #stats th.sec {
+    text-align: left;
+    padding: 7px 0 3px 0;
+    color: #9bc35a;
+    font-weight: 600;
+    font-size: 10px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    border-bottom: 1px solid rgba(179, 255, 71, 0.15);
+  }
+  #stats tr.first th.sec { padding-top: 2px; }
+  #stats td.k {
+    color: #8b93a8;
+    padding: 1px 6px 1px 0;
+    vertical-align: top;
+  }
+  #stats td.v {
+    color: #ffd79a;                      /* the numbers, bright */
+    text-align: right;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+    vertical-align: top;
+  }
+  #stats .u { color: #7d8496; font-weight: 400; }   /* units / qualifiers */
+  #stats .warn { color: #ff6b6b; }
+  #stats .ok   { color: #9bc35a; }
+
+  #hint {
+    position: absolute; bottom: 12px; left: 14px;
+    color: #44465a; font-size: 11px;
+    z-index: 10;
+  }
+</style>
+</head>
+<body>
+<div id="sceneContainer"></div>
+
+<div id="sidepanel">
+
+  <!-- ============ item 1: controls ============ -->
+  <div class="sidepanel-item" id="panelItem">
+    <input type="checkbox" class="sp-toggle" id="spControls" checked>
+    <label class="sp-summary" for="spControls">Controls</label>
+    <div class="sidepanel-body" id="panel">
+
+      <div class="row">
+        <label><span>Sim speed (Δt ×)</span><output id="outSpeed">1.0×</output></label>
+        <input type="range" id="simSpeedLog" min="-2" max="3.3" step="0.01" value="0">
+      </div>
+
+      <div class="subpanel">
+        BH parameters
+        <div class="row">
+          <label><span>Mass</span><output id="outBhMass">1.0e+4 M☉</output></label>
+          <input type="range" id="bhMassLog" min="0.3" max="10" step="0.1" value="4">
+        </div>
+
+        <div class="row">
+          <label><span>Spin (Kerr)</span><output id="outBhSpin">0.00</output></label>
+          <input type="range" id="bhSpinEl" min="0" max="1" step="0.01" value="0">
+        </div>
+
+        <div class="row">
+          <label><span>Disk peak temperature</span><output id="outTemp0">1e+5 K</output></label>
+          <input type="range" id="temp0Log" min="-3" max="0" step="0.01" value="-1.25">
+        </div>
+
+        <div class="row">
+          <div class="checkrow">
+            <input type="checkbox" id="ringImagesEnabled" checked>
+            <label for="ringImagesEnabled" style="color:#8b93a8;">Higher-order lensed images</label>
+          </div>
+          <label><span>Higher-order brightness</span><output id="outHO">0.004</output></label>
+          <input type="range" id="hoEl" min="0" max="1" step="0.01" value="0.04">
+        </div>
+
+        <div class="checkrow">
+          <input type="checkbox" id="dopplerEnabled" checked>
+          <label for="dopplerEnabled" style="color:#8b93a8;">Doppler shift + beaming</label>
+        </div>
+        <div class="row">
+          <label><span>Beaming exponent (4 = physical)</span><output id="outBeamC">3</output></label>
+          <input type="range" id="beamCEl" min="0" max="6" step="0.1" value="3">
+        </div>
+        <div class="row">
+          <label><span>Doppler β cutoff</span><output id="outBetaCut">0.05</output></label>
+          <input type="range" id="betaCutEl" min="0" max="0.3" step="0.01" value="0.05">
+        </div>
+
+        <div class="checkrow">
+          <input type="checkbox" id="showHorizon">
+          <label for="showHorizon" style="color:#8b93a8;">Show horizon wireframe</label>
+        </div>
+
+      </div>
+
+      <div class="subpanel">
+        Accretion Disk mechanics
+        <div class="row">
+          <label><span>Particles</span><output id="outN">80000</output></label>
+          <input type="range" id="nParticles" min="200" max="200000" step="200" value="80000">
+        </div>
+
+        <div class="row">
+          <label><span>Disk mass</span><output id="outK">0.2</output></label>
+          <input type="range" id="kDisk" min="0" max="1" step="0.01" value="0.2">
+        </div>
+        <div class="checkrow">
+          <input type="checkbox" id="sphericalSpawnEl">
+          <label for="sphericalSpawnEl" style="color:#8b93a8;">Spherical distribution</label>
+        </div>
+        <div class="row">
+          <label><span>Velocity noise (σ)</span><output id="outVelNoise">0.00</output></label>
+          <input type="range" id="velNoiseEl" min="0" max="0.3" step="0.01" value="0.00">
+        </div>
+
+        <div class="row">
+          <label><span>Position noise (σ)</span><output id="outPosNoise">0.01</output></label>
+          <input type="range" id="posNoiseEl" min="0" max="0.2" step="0.01" value="0.01">
+        </div>
+
+        <div class="row">
+          <label><span>Drag strength (viscosity)</span><output id="outDrag">0.2</output></label>
+          <input type="range" id="dragEl" min="0" max="2" step="0.01" value="0.2">
+        </div>
+
+        <div class="checkrow">
+          <input type="checkbox" id="showShapeAxes">
+          <label for="showShapeAxes" style="color:#8b93a8;">Show distribution axes</label>
+        </div>
+      </div>
+
+      <div class="subpanel">
+        Planck → rgb (display policy)
+        <div class="row">
+          <label><span>Black point (log₁₀ L_vis)</span><output id="outBrightLo">-6.0</output></label>
+          <input type="range" id="brightLoEl" min="-12" max="2" step="0.1" value="-6">
+        </div>
+        <div class="row">
+          <label><span>Full scale (log₁₀ L_vis)</span><output id="outBrightHi">8</output></label>
+          <input type="range" id="brightHiEl" min="0" max="12" step="0.1" value="8">
+        </div>
+        <div class="row">
+          <label><span>Contrast γ</span><output id="outGamma">0.8</output></label>
+          <input type="range" id="gammaEl" min="0.2" max="3" step="0.05" value="0.8">
+        </div>
+        <div class="row">
+          <label><span>Whiteout knee</span><output id="outWhiteout">0.75</output></label>
+          <input type="range" id="whiteoutEl" min="0" max="1" step="0.01" value="0.75">
+        </div>
+        <div class="row">
+          <label><span>Cold false-colour</span><output id="outFalseAmt">0.2</output></label>
+          <input type="range" id="falseAmtEl" min="0" max="1" step="0.01" value="0.2">
+        </div>
+        <div class="row">
+          <label><span>Dark threshold (r+g+b)</span><output id="outFalseDark">0.40</output></label>
+          <input type="range" id="falseDarkEl" min="0" max="2" step="0.02" value="0.4">
+        </div>
+        <div class="row">
+          <label><span>Cold threshold (K)</span><output id="outFalseCold">3000</output></label>
+          <input type="range" id="falseColdEl" min="500" max="8000" step="100" value="3000">
+        </div>
+        <div class="row">
+          <label><span>Size ∝ brightness</span><output id="outSizeGain">0.25</output></label>
+          <input type="range" id="sizeGainEl" min="0" max="2" step="0.05" value="0.25">
+        </div>
+      </div>
+
+      <div class="subpanel">
+        Starfield
+        <div class="checkrow">
+          <input type="checkbox" id="starfieldEnabled" checked>
+          <label for="starfieldEnabled" style="color:#8b93a8;">Remote starfield</label>
+        </div>
+        <div class="row">
+          <label><span>Brightness</span><output id="outStarBright">2.5</output></label>
+          <input type="range" id="starBrightEl" min="0" max="3" step="0.05" value="2.5">
+        </div>
+        <div class="row">
+          <label><span>Star count</span><output id="outNStars">8000</output></label>
+          <input type="range" id="nStarsEl" min="2000" max="12000" step="500" value="8000">
+        </div>
+        <div class="row">
+          <label><span>Star size (px)</span><output id="outStarPixel">1.5</output></label>
+          <input type="range" id="starPixelEl" min="1" max="10" step="0.5" value="1.5">
+        </div>
+      </div>
+
+      <div class="subpanel">
+        Lone Star
+        <div class="checkrow">
+          <input type="checkbox" id="starVisible" checked>
+          <label for="starVisible" style="color:#8b93a8;">Show star</label>
+        </div>
+        <div class="row">
+          <label><span>semi-major axis</span><output id="outStarA">1.00 AU</output></label>
+          <input type="range" id="starA" min="0.4" max="2.5" step="0.01" value="1.0">
+        </div>
+        <div class="row">
+          <label><span>eccentricity</span><output id="outStarE">0.30</output></label>
+          <input type="range" id="starE" min="0" max="0.8" step="0.01" value="0.3">
+        </div>
+        <div class="row">
+          <label><span>inclination</span><output id="outStarI">10°</output></label>
+          <input type="range" id="starI" min="0" max="90" step="1" value="10">
+        </div>
+        <div class="row">
+          <label><span>radius</span><output id="outStarR">1.0 R☉</output></label>
+          <input type="range" id="starR" min="0.2" max="20" step="0.1" value="1.0">
+        </div>
+        <div class="row">
+          <label><span>temperature</span><output id="outStarT">5.8 kK</output></label>
+          <input type="range" id="starT" min="2.5" max="30" step="0.1" value="5.8">
+        </div>
+      </div>
+
+      <button id="reset">Reset simulation</button>
+    </div>
+  </div>
+
+  <!-- ============ item 2: stats ============ -->
+  <div class="sidepanel-item" id="statsItem">
+    <input type="checkbox" class="sp-toggle" id="spStats" checked>
+    <label class="sp-summary" for="spStats">Diagnostics</label>
+    <div class="sidepanel-body">
+      <div id="stats"></div>
+    </div>
+  </div>
+
+</div>
+</div>
+
+<div id="hint">drag: orbit · scroll: zoom · shift-drag: pan · <a href="https://flaez.ch/">flaez.ch</a>  </div>
+
+<script type="importmap">
+{
+  "imports": {
+    "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+    "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+  }
+}
+</script>
+
+<script type="module">
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+"use strict";
+
+// =====================================================================
+// PHYSICS
+// =====================================================================
+//natural units mean M=0.5, r_s = 1, B_CRIT ~= 2.6
+const C = 1;
+const GM = 0.5;
+const RS = 2 * GM / (C*C);
+const B_CRIT = 3 * Math.sqrt(3) * GM / (C*C);
+const R_INNER_KILL = 2.5 * RS;
+const R_HITBOX = 15 * RS;
+
+// Camera exclusion zone. NOT a physical scale — it is the radius inside which
+// the rendering approximations (thin-lens zeroth order, Born-approximation Kerr
+// correction, higher-order-image handling) stop being defensible. The shadow
+// half-angle for a static observer is ~28° at 5 r_s and ~14° at 10 r_s; below
+// ~5 r_s the background sky starts to wrap and the one-sample-per-pixel model
+// is the wrong data structure, not merely an inaccurate one.
+const R_FORBID = 2 * RS;   // TESTING VALUE (was 5): deliberately inside the
+                           // regime where the approximations are indefensible,
+                           // to make effect sizes large enough to judge.
+
+// Spawn annulus 
+// orbital speeds at the inner edge are genuinely relativistic. SAFE_SPAWN_FLOOR is
+// a hard clamp applied AFTER position noise, independent of how large
+// posNoise is set — no combination of slider values can spawn a particle
+// inside the horizon or immediately back into the recycle zone.
+const SAFE_SPAWN_FLOOR = 1.5 * RS;   // must be larger than R_INNER_KILL
+const R_SPAWN_MIN = 2.5 * RS;        // v_circ here ~0.75c — see stats readout
+const R_SPAWN_MAX = R_HITBOX * 3;
+const R_ESCAPE = R_SPAWN_MAX * 1.5;
+
+// physical-unit conversion layer: purely a display/labeling layer on top of
+// the dimensionless (RS=1, GM=0.5, c=1) integrator above. Changing bhMassSolar
+// never touches the dynamics — only how internal units are reported in km/s.
+const RS_KM_PER_MSUN = 2.9532500;    // Schwarzschild radius per solar mass
+const TAU_SEC_PER_MSUN = 9.8508e-6;  // seconds per internal time-unit, per solar mass
+// kDisk is no longer an arbitrary spring constant: it IS the disk's total mass,
+// expressed as a fraction of M_BH and mapped logarithmically so the slider spans
+// "dynamically irrelevant" to "self-gravitating". At the top of the range the
+// disk's vertical pull on its own material is comparable to the hole's, which is
+// the regime where a real disk would fragment.
+const DISK_MASS_MIN = 1e-3;          // kDisk just above 0
+const DISK_MASS_MAX = 1.0;           // kDisk = 1  ->  M_disk = M_BH
+function diskMassFraction() {
+  return kDisk <= 0 ? 0 : DISK_MASS_MIN * Math.pow(DISK_MASS_MAX / DISK_MASS_MIN, kDisk);
+}
+// internal units have G = 1, so M_BH = GM and the disk mass is a plain number
+function diskMassInternal() { return diskMassFraction() * GM; }
+const MSUN_KG = 1.989e30;
+let bhMassSolar = 1e4;               // "intermediate" default, r_s ~= 30000 km, scene is a few light-seconds across (100*r_s ~= 0.02 AU)
+let bhSpin = 0;                      // dimensionless Kerr spin a* = Jc/(GM²) ∈ [0,1]; 0 = Schwarzschild
+let sphericalSpawn = false;          // isotropic (spherical) initial distribution vs. flat disk
+let internalTimeElapsed = 0;         // accumulated internal time-units since page load
+
+// --- terminal redshift / accretion bookkeeping ---
+// A particle is treated as "absorbed" once its OBSERVED (redshifted)
+// temperature drops below T_CUTOFF_K — the temperature at which its color
+// is already indistinguishable from black (see the FOPT/brightness
+// machinery above). 
+let currentParticleMassKg = 0; // recomputed each frame from bhMassSolar/N — display + accretion bookkeeping only, never dynamical
+let accretedMassKg = 0;
+let absorbedCount = 0;
+let safetyRecycleCount = 0;
+let horizonBreachCount = 0; // dedicated counter for the explicit r<=RS safety check below
+
+const T_ISCO_INTERNAL = 2 * Math.PI * Math.sqrt(Math.pow(6*RS,3)/GM); // ISCO period
+
+let N = 80000;
+let kDisk = 0.2; // normalized [0,1] (disk mass)
+const TWO_PI = 2 * Math.PI;
+// Vertical settling is DISSIPATION, so it belongs to viscosity, not to mass.
+// A real disk does not flatten because it is self-gravitating (it usually isn't);
+// it flattens because collisions radiate away vertical kinetic energy while
+// angular momentum is conserved. The restoring force is already supplied by the
+// hole, so all that is needed is damping at a rate set by the orbital frequency.
+const DISK_SETTLE_ZETA = 0.35;   // x dragStrength = damping ratio; 0.1 -> ~4.6 orbits
+let simSpeed = 1.0;
+let velNoise = 0.00;
+let posNoise = 0.01;
+const DT = 0.01;
+const SUBSTEPS = 2;
+
+// disk temperature (Shakura-Sunyaev temperature field): T(r) ~ T0 * r^(-3/4). 
+// T0  realistically should be (near) Eddington temperature
+// "cheat" slider temp0Log allows lowering this so the disk isn't in complete whiteout
+let tEdd = eddingtonPeakTempK(bhMassSolar);
+let temp0K = 0.056*tEdd; // log slider temp0Log
+
+// blackbody color table. LOGT is natural-log(T in kK), exp(4.605) = 100.0 kK
+const LOGT = [0.0, 0.833, 1.361, 1.668, 1.792, 1.988, 2.303, 3.497, 4.605];
+const PLANCK_RGB = [
+  [0.251, 0.000, 0.000], [1.000, 0.404, 0.129],
+  [1.000, 0.784, 0.529], [0.973, 1.000, 0.914],
+  [0.894, 0.996, 1.000], [0.706, 0.878, 1.000],
+  [0.529, 0.753, 1.000], [0.337, 0.592, 1.000],
+  [0.298, 0.545, 0.973]
+];
+// FOPT: fraction of blackbody power falling in the visible band. 
+//This table has ONE MORE entry than LOGT/PLANCK_RGB (10 vs 9),
+// this is a bit awkward, but FOPT[1..9] pairs with LOGT[0..8] 
+// FOPT[0] is used by buildTempLUT, so truncate it as FOPT_MATCHED,
+// it's fine, just leave it like this.
+const FOPT = [1e-8, 6e-6, 0.03, 0.24, 0.39, 0.42, 0.43, 0.35, 0.035, 0.0017];
+const FOPT_MATCHED = FOPT.slice(1); // length 9, aligned with LOGT
+
+function log10(x) { return Math.log(x) / Math.LN10; }
+
+// log10(FOPT) as a function of temperature: log-log interpolated within the
+// table, log-log EXTRAPOLATED below LOGT[0]=1kK using the slope of the
+// lowest known segment (there's no data down there, but the falloff has to
+// continue smoothly, and this is the simplest defensible continuation).
+function foptLog10FromTemp(tKelvin) {
+  const logT = Math.log(tKelvin / 1000);
+  if (logT <= LOGT[0]) {
+    const slope = (log10(FOPT_MATCHED[1]) - log10(FOPT_MATCHED[0])) / (LOGT[1] - LOGT[0]);
+    return log10(FOPT_MATCHED[0]) + slope * (logT - LOGT[0]);
+  }
+  if (logT >= LOGT[LOGT.length - 1]) return log10(FOPT_MATCHED[FOPT_MATCHED.length - 1]);
+  let idx = 0;
+  while (idx < LOGT.length - 2 && LOGT[idx + 1] < logT) idx++;
+  const t0 = LOGT[idx], t1 = LOGT[idx + 1];
+  const frac = (logT - t0) / (t1 - t0);
+  const f0 = log10(FOPT_MATCHED[idx]), f1 = log10(FOPT_MATCHED[idx + 1]);
+  return f0 + (f1 - f0) * frac;
+}
+// =====================================================================
+// foptLog10FromTemp() clamps flat above
+// LOGT[8] = 100 kK, returning log10(0.0017) forever. Harmless today
+// (T_CUTOFF_K is a cold-end solve) but it will disagree with the shader as
+// soon as anything hot queries it. Use this instead (same tail):
+// =====================================================================
+function foptLog10FromTempFixed(tKelvin) {
+  const logT = Math.log(tKelvin / 1000);
+  const last = LOGT.length - 1;
+  if (logT >= LOGT[last]) {
+    return log10(FOPT_MATCHED[last]) - (2.89 / Math.LN10) * (logT - LOGT[last]);
+  }
+  return foptLog10FromTemp(tKelvin); // unchanged below the top of the table
+}
+
+
+// brightness scale: peak FOPT (0.43, log10=-0.36) -> brightness 1.0
+function brightnessFromTemp(tKelvin) {
+  return Math.min(1, Math.max(0, (foptLog10FromTemp(tKelvin) + 10.36) / 10));
+}
+
+// cutoff temperature: solved numerically (bisection, not hand-derived) for
+// where hue*brightness drops below "#020000" — using PLANCK_RGB[0]'s red
+// channel (0.251) since that's the only nonzero channel in the cold/clamped
+// hue regime where this cutoff actually matters.
+const BRIGHTNESS_CUTOFF = (2/255) / PLANCK_RGB[0][0];
+function findCutoffTempK(targetBrightness) {
+  let lo = 1, hi = 2000;
+  for (let iter = 0; iter < 80; iter++) {
+    const mid = Math.sqrt(lo * hi);
+    if (brightnessFromTemp(mid) < targetBrightness) lo = mid; else hi = mid;
+  }
+  return Math.sqrt(lo * hi);
+}
+const T_CUTOFF_K = findCutoffTempK(BRIGHTNESS_CUTOFF); // ~337K
+
+const FALSE_COLOR_BROWN = [0.50, 0.32, 0.15]; // visibility hack for T < 1000K "cold dust"
+const T_BROWN_FULL = 300; // below this observed temp, pure brown; blends to the table above
+
+// ---- GPU temperature LUT (inherited from adastra's shaderstrings.js) ----
+// Precompute a 256×1 RGBA float texture: rgb = blackbody color, a = FOPT
+// (visible-band power fraction). The shader's tempLookup(tempKK) samples this
+// and handles blackout (<1kK) and whiteout (>33kK) analytically. Reuses the
+// existing LOGT/PLANCK_RGB/FOPT arrays.
+const LUT_LOG_T_MAX = Math.log(33); // 3.497 — upper bound of the LUT (33 kK)
+function buildTempLUT() {
+  const LUT_SIZE = 256;
+  const data = new Float32Array(LUT_SIZE * 4);
+  for (let i = 0; i < LUT_SIZE; i++) {
+    const logT = (i / (LUT_SIZE - 1)) * LUT_LOG_T_MAX;
+    let seg = LOGT.length - 2;
+    for (let j = 0; j < LOGT.length - 1; j++) {
+      if (logT <= LOGT[j + 1]) { seg = j; break; }
+    }
+    const t = Math.min(1, Math.max(0, (logT - LOGT[seg]) / (LOGT[seg+1] - LOGT[seg])));
+    const lerp = (a, b) => a + (b - a) * t;
+    data[i*4+0] = lerp(PLANCK_RGB[seg][0], PLANCK_RGB[seg+1][0]);
+    data[i*4+1] = lerp(PLANCK_RGB[seg][1], PLANCK_RGB[seg+1][1]);
+    data[i*4+2] = lerp(PLANCK_RGB[seg][2], PLANCK_RGB[seg+1][2]);
+    data[i*4+3] = lerp(FOPT_MATCHED[seg], FOPT_MATCHED[seg+1]);
+  }
+  const tex = new THREE.DataTexture(data, LUT_SIZE, 1, THREE.RGBAFormat, THREE.FloatType);
+  tex.magFilter = THREE.LinearFilter;
+  tex.minFilter = THREE.LinearFilter;
+  tex.needsUpdate = true;
+  return tex;
+}
+const tempLUT = buildTempLUT();
+
+// --- drag / viscosity heuristic: a coarse RADIAL density histogram built in
+// one O(N) pass (not O(N^2) pairwise interaction), volume-normalized so it's
+// a genuine density estimate rather than a raw bin count. Drag is a simple
+// velocity-proportional term scaled by local density — a cheap stand-in for
+// MRI/viscous angular-momentum transport, tuned for watchability rather than
+// derived, since real viscous inspiral timescales are far too slow to see.
+let dragStrength = 0.2;
+// dragStrength is normalized [0,1], scale it by DRAG_SCALE,
+// this has to be a small number as the density norm's natural ~1/r^3 falloff 
+// toward the center otherwise quickly makes the drag effect comically large
+const DRAG_SCALE = 2e-6; 
+
+const N_DRAG_BINS = 48;
+const DRAG_R_MIN = 1.2 * RS;
+const DRAG_R_MAX = R_ESCAPE;
+const dragBinEdges = new Float32Array(N_DRAG_BINS + 1);
+const dragBinVolumes = new Float32Array(N_DRAG_BINS);
+for (let i = 0; i <= N_DRAG_BINS; i++) {
+  dragBinEdges[i] = DRAG_R_MIN * Math.pow(DRAG_R_MAX / DRAG_R_MIN, i / N_DRAG_BINS);
+}
+for (let i = 0; i < N_DRAG_BINS; i++) {
+  const a = dragBinEdges[i], b = dragBinEdges[i + 1];
+  dragBinVolumes[i] = (4 / 3) * Math.PI * (b*b*b - a*a*a);
+}
+const REFERENCE_VOLUME = (4 / 3) * Math.PI * Math.pow(DRAG_R_MAX, 3);
+const dragBinCounts = new Float32Array(N_DRAG_BINS);
+const dragBinDensityNorm = new Float32Array(N_DRAG_BINS).fill(1);
+// Enclosed DISK mass inside each bin's outer edge. The disk's own monopole was
+// the missing half of "disk mass": the vertical sheet term made the disk hold
+// itself flat, but nothing made its mass pull radially, so at k_disk = 1 -- where
+// the disk weighs as much as the hole -- orbits were still perfectly Keplerian
+// and off-plane material felt no extra central attraction to bob against.
+const dragBinMassCum = new Float32Array(N_DRAG_BINS + 1);
+
+// Enclosed disk mass at radius r, linear in log-r between bin edges so the
+// resulting acceleration is continuous rather than stepping at bin boundaries.
+function enclosedDiskMass(r) {
+  if (r <= DRAG_R_MIN) return 0;
+  if (r >= DRAG_R_MAX) return dragBinMassCum[N_DRAG_BINS];
+  const t = Math.log(r / DRAG_R_MIN) / Math.log(DRAG_R_MAX / DRAG_R_MIN) * N_DRAG_BINS;
+  const i = Math.min(N_DRAG_BINS - 1, Math.max(0, Math.floor(t)));
+  const f = t - i;
+  return dragBinMassCum[i] + f * (dragBinMassCum[i + 1] - dragBinMassCum[i]);
+}
+
+function densityBinIndex(r) {
+  const rc = Math.min(DRAG_R_MAX, Math.max(DRAG_R_MIN, r));
+  const t = Math.log(rc / DRAG_R_MIN) / Math.log(DRAG_R_MAX / DRAG_R_MIN);
+  return Math.min(N_DRAG_BINS - 1, Math.max(0, Math.floor(t * N_DRAG_BINS)));
+}
+
+// =====================================================================
+// DISTRIBUTION AGGREGATES 
+// we originally implemented this to build higher-order rings as 
+// drawn objects estimated from matter distribution. The rings are now emergent
+// from point particles, but we'll keep this data to model accretion disk dynamics.
+// Two complementary structures, both built in the same O(N) pass as the
+// drag map so there's no extra loop over particles:
+//   1. Shape tensor S_ij = Σ x_i x_j — a second moment, so dominated by the
+//      OUTER envelope. Its eigen-decomposition gives global flatness (disk vs
+//      sphere vs filament) and the live principal-axis orientation, measured
+//      from actual particle data rather than assumed from the disk-bias axis.
+//   2. A coarse 5^3 Cartesian voxel grid at 2 r_s cells (±5 r_s extent),
+//      capturing INNER-region fine spatial structure where lensing is
+//      strongest. Odd n puts the disk midplane cleanly in the central layer.
+// These deliberately cover different scales: the tensor sees the big outer
+// shape the small grid can't reach; the grid sees inner detail the tensor
+// smears into a single moment.
+// =====================================================================
+
+// A Cartesian voxel grid is the wrong shape for a disk. The old 5^3 @ 2 r_s box
+// spanned +/-5 r_s, i.e. it spent most of its cells on the region the BH itself
+// occupies (nothing orbits below R_SPAWN_MIN = 2.5 r_s) and reached only a
+// twentieth of the way out to R_SPAWN_MAX. It also resolved z far more finely
+// than the disk is thick while resolving R not at all.
+//
+// Replaced with a POLAR (R, phi) map in the MEASURED disk frame:
+//   - log-spaced in R, starting just inside the inner disk edge, so every decade
+//     of radius gets equal resolution and no cells are wasted on the hole;
+//   - 16 azimuthal sectors, which is what makes the density "local" -- clumps and
+//     arms show up as azimuthal contrast, the thing drag should actually respond to;
+//   - z is not binned but REDUCED to a per-ring scale height from <z^2>, because
+//     the vertical structure only enters through two numbers: the column density
+//     Sigma (which sets the self-gravity) and h (which sets its softening).
+// Same single O(N) pass, fewer cells, far more particles per cell.
+const PG_NR = 24, PG_NPHI = 16;
+const PG_R_MIN = R_SPAWN_MIN * 0.6;
+const PG_R_MAX = R_ESCAPE;
+const PG_LOGSPAN = Math.log(PG_R_MAX / PG_R_MIN);
+const pgREdges  = new Float32Array(PG_NR + 1);
+const pgCellArea = new Float32Array(PG_NR);   // area of ONE (R,phi) cell in ring i
+const pgRingArea = new Float32Array(PG_NR);   // full annulus area
+for (let i = 0; i <= PG_NR; i++) pgREdges[i] = PG_R_MIN * Math.exp(PG_LOGSPAN * i / PG_NR);
+for (let i = 0; i < PG_NR; i++) {
+  const a = pgREdges[i], b = pgREdges[i+1];
+  pgRingArea[i] = Math.PI * (b*b - a*a);
+  pgCellArea[i] = pgRingArea[i] / PG_NPHI;
+}
+const pgCount     = new Float32Array(PG_NR * PG_NPHI);
+const pgSigma     = new Float32Array(PG_NR * PG_NPHI);  // surface density, internal units
+const pgContrast  = new Float32Array(PG_NR * PG_NPHI).fill(1); // cell density / ring mean
+const pgRingCount = new Float32Array(PG_NR);
+const pgRingZ2    = new Float32Array(PG_NR);
+const pgRingH     = new Float32Array(PG_NR).fill(1);    // rms |z| per ring, floored
+let pgInGrid = 0, pgOccupied = 0, pgPeakContrast = 1;
+
+// Vertical self-gravity softening: the razor-thin-sheet field 2*pi*G*Sigma is
+// discontinuous at z=0, so it is softened over the measured scale height. Without
+// a floor the disk collapses onto the plane, h -> 0, and the near-plane spring
+// constant 2*pi*G*Sigma/h runs away -- there is no pressure support in this sim
+// to stop it.
+const PG_H_MIN = 0.12 * RS;
+
+function pgRingIndexOf(R) {
+  if (R < PG_R_MIN || R > PG_R_MAX) return -1;
+  const t = Math.log(R / PG_R_MIN) / PG_LOGSPAN;
+  return Math.min(PG_NR - 1, Math.max(0, Math.floor(t * PG_NR)));
+}
+
+// shape-tensor eigen results, refreshed each frame
+let shapeExtents = [1, 1, 1];       // rms extents along principal axes, descending
+let shapeAxes = [[1,0,0],[0,1,0],[0,0,1]]; // matching eigenvectors (unit), descending
+let shapeSphericity = 1;            // smallest/largest extent ratio: 1=sphere, →0=flat/thin
+
+function jacobiEigen3(m00, m01, m02, m11, m12, m22) {
+  const a = [[m00,m01,m02],[m01,m11,m12],[m02,m12,m22]];
+  const v = [[1,0,0],[0,1,0],[0,0,1]];
+  for (let sweep = 0; sweep < 20; sweep++) {
+    const off = Math.abs(a[0][1]) + Math.abs(a[0][2]) + Math.abs(a[1][2]);
+    if (off < 1e-14) break;
+    const pairs = [[0,1],[0,2],[1,2]];
+    for (const [p, q] of pairs) {
+      const apq = a[p][q];
+      if (Math.abs(apq) < 1e-18) continue;
+      const theta = 0.5 * Math.atan2(2*apq, a[q][q] - a[p][p]);
+      const c = Math.cos(theta), s = Math.sin(theta);
+      for (let k=0;k<3;k++){ const akp=a[k][p], akq=a[k][q]; a[k][p]=c*akp-s*akq; a[k][q]=s*akp+c*akq; }
+      for (let k=0;k<3;k++){ const apk=a[p][k], aqk=a[q][k]; a[p][k]=c*apk-s*aqk; a[q][k]=s*apk+c*aqk; }
+      for (let k=0;k<3;k++){ const vkp=v[k][p], vkq=v[k][q]; v[k][p]=c*vkp-s*vkq; v[k][q]=s*vkp+c*vkq; }
+    }
+  }
+  return {
+    values: [a[0][0], a[1][1], a[2][2]],
+    vectors: [[v[0][0],v[1][0],v[2][0]],[v[0][1],v[1][1],v[2][1]],[v[0][2],v[1][2],v[2][2]]]
+  };
+}
+
+function buildDensityMap() {
+  dragBinCounts.fill(0);
+  pgCount.fill(0); pgRingCount.fill(0); pgRingZ2.fill(0);
+  pgInGrid = 0;
+
+  // shape-tensor accumulators (second moment about the BH at origin)
+  let sxx=0, sxy=0, sxz=0, syy=0, syz=0, szz=0;
+
+  // Bin in the PREVIOUS frame's disk frame. One frame stale is harmless (the
+  // frame turns far slower than the disk orbits) and it breaks the circular
+  // dependency: the frame is derived from the tensor accumulated in this loop.
+  const n = diskNormalLive, e1 = diskE1, e2 = diskE2;
+
+  for (let i = 0; i < N; i++) {
+    const ix = i*3;
+    const x = pos[ix], y = pos[ix+1], z = pos[ix+2];
+    const r = Math.hypot(x, y, z);
+    dragBinCounts[densityBinIndex(r)]++;
+
+    sxx += x*x; sxy += x*y; sxz += x*z;
+    syy += y*y; syz += y*z; szz += z*z;
+
+    // project into the disk frame
+    const h  = x*n[0]  + y*n[1]  + z*n[2];
+    const u1 = x*e1[0] + y*e1[1] + z*e1[2];
+    const u2 = x*e2[0] + y*e2[1] + z*e2[2];
+    const R  = Math.hypot(u1, u2);
+    pgZ[i] = h;
+    const ri = pgRingIndexOf(R);
+    if (ri >= 0) {
+      let pi = Math.floor((Math.atan2(u2, u1) + Math.PI) * (PG_NPHI / (2*Math.PI)));
+      if (pi < 0) pi = 0; else if (pi >= PG_NPHI) pi = PG_NPHI - 1;
+      const ci = ri*PG_NPHI + pi;
+      pgCount[ci]++; pgRingCount[ri]++; pgRingZ2[ri] += h*h;
+      pgCell[i] = ci; pgRing[i] = ri; pgInGrid++;
+    } else {
+      pgCell[i] = -1; pgRing[i] = -1;
+    }
+  }
+
+  // surface density, scale height, and azimuthal contrast
+  const mPart = diskMassInternal() / Math.max(1, N);
+  pgOccupied = 0; pgPeakContrast = 1;
+  for (let ri = 0; ri < PG_NR; ri++) {
+    const rc = pgRingCount[ri];
+    pgRingH[ri] = Math.max(PG_H_MIN, rc > 0 ? Math.sqrt(pgRingZ2[ri] / rc) : PG_H_MIN);
+    const meanCell = rc / PG_NPHI;     // expected count per cell if axisymmetric
+    for (let pi = 0; pi < PG_NPHI; pi++) {
+      const ci = ri*PG_NPHI + pi, c = pgCount[ci];
+      if (c > 0) pgOccupied++;
+      pgSigma[ci] = c * mPart / pgCellArea[ri];
+      const k = meanCell > 0 ? c / meanCell : 1;
+      pgContrast[ci] = k;
+      if (k > pgPeakContrast) pgPeakContrast = k;
+    }
+  }
+
+  // normalized so that a bin matching "N particles spread uniformly over the
+  // whole DRAG_R_MAX sphere" reads as exactly 1.0 — makes the drag slider's
+  // meaning roughly independent of N.
+  const norm = REFERENCE_VOLUME / Math.max(1, N);
+  for (let i = 0; i < N_DRAG_BINS; i++) {
+    dragBinDensityNorm[i] = (dragBinCounts[i] / dragBinVolumes[i]) * norm;
+  }
+
+  // cumulative disk mass inside each bin edge (spherical enclosure is fine here:
+  // the disk is flat, so "inside radius r" and "inside the sphere of radius r"
+  // contain the same material)
+  {
+    const mP = diskMassInternal() / Math.max(1, N);
+    let acc = 0;
+    dragBinMassCum[0] = 0;
+    for (let i = 0; i < N_DRAG_BINS; i++) {
+      acc += dragBinCounts[i] * mP;
+      dragBinMassCum[i + 1] = acc;
+    }
+  }
+
+  // eigen-decompose the shape tensor (normalized by N so extents are in r_s)
+  const invN = 1 / Math.max(1, N);
+  const eig = jacobiEigen3(sxx*invN, sxy*invN, sxz*invN, syy*invN, syz*invN, szz*invN);
+  const order = [0,1,2].sort((a,b) => eig.values[b] - eig.values[a]); // descending
+  shapeExtents = order.map(k => Math.sqrt(Math.max(0, eig.values[k])));
+  shapeAxes = order.map(k => eig.vectors[k]);
+  shapeSphericity = shapeExtents[0] > 1e-9 ? shapeExtents[2] / shapeExtents[0] : 1;
+
+  // ---- update the live disk frame from the tensor just measured -------------
+  // Only while the cloud is actually flattened; for a round distribution the
+  // minor axis is noise and the fixed spawn normal is the honest fallback.
+  if (shapeSphericity < DISK_FRAME_SPHERICITY_MAX) {
+    let m = shapeAxes[2];
+    // sign-align to the current normal so the basis never flips
+    const dotPrev = m[0]*diskNormalLive[0] + m[1]*diskNormalLive[1] + m[2]*diskNormalLive[2];
+    if (dotPrev < 0) m = [-m[0], -m[1], -m[2]];
+    const a = DISK_FRAME_LERP;
+    let nx = diskNormalLive[0] + a*(m[0]-diskNormalLive[0]);
+    let ny = diskNormalLive[1] + a*(m[1]-diskNormalLive[1]);
+    let nz = diskNormalLive[2] + a*(m[2]-diskNormalLive[2]);
+    const ln = Math.hypot(nx, ny, nz) || 1;
+    diskNormalLive = [nx/ln, ny/ln, nz/ln];
+  } else {
+    const a = DISK_FRAME_LERP;
+    let nx = diskNormalLive[0] + a*(diskNormal[0]-diskNormalLive[0]);
+    let ny = diskNormalLive[1] + a*(diskNormal[1]-diskNormalLive[1]);
+    let nz = diskNormalLive[2] + a*(diskNormal[2]-diskNormalLive[2]);
+    const ln = Math.hypot(nx, ny, nz) || 1;
+    diskNormalLive = [nx/ln, ny/ln, nz/ln];
+  }
+  rebuildDiskBasis();
+}
+
+const diskNormal = [0, 1, 0];        // spawn/reference plane; also the fallback
+const H_TAPER_START = 5 * RS;
+const H_CUTOFF = 9 * RS;
+
+// measure live disk frame:
+// The shape tensor's MINOR principal axis is the disk normal. Three cautions:
+//   - eigenvectors have arbitrary sign, so it is flipped to track the previous
+//     frame rather than flickering between +n and -n;
+//   - it is smoothed in time, because the disk bias feeds back into the very
+//     distribution the tensor measures and an unfiltered loop can hunt;
+//   - it is only trusted while the distribution is actually flat. For a round
+//     cloud (spherical spawn) the minor axis is arbitrary noise, so the frame
+//     falls back to the fixed spawn normal.
+let diskNormalLive = [0, 1, 0];
+let diskE1 = [1, 0, 0], diskE2 = [0, 0, 1];
+const DISK_FRAME_LERP = 0.05;        // per-frame blend toward the measured axis
+const DISK_FRAME_SPHERICITY_MAX = 0.75;
+
+function rebuildDiskBasis() {
+  const n = diskNormalLive;
+  const ref = Math.abs(n[1]) < 0.9 ? [0,1,0] : [1,0,0];
+  let e1 = [ref[1]*n[2]-ref[2]*n[1], ref[2]*n[0]-ref[0]*n[2], ref[0]*n[1]-ref[1]*n[0]];
+  const l1 = Math.hypot(e1[0],e1[1],e1[2]) || 1;
+  e1 = [e1[0]/l1, e1[1]/l1, e1[2]/l1];
+  diskE1 = e1;
+  diskE2 = [n[1]*e1[2]-n[2]*e1[1], n[2]*e1[0]-n[0]*e1[2], n[0]*e1[1]-n[1]*e1[0]];
+}
+rebuildDiskBasis();
+
+let pos, q, tau, gFactor;
+let pgCell, pgRing, pgZ;   // per-particle polar-map indices + disk-frame height
+let lastInsideCount = 0;
+let lastAvgG = 1;
+
+function vCircular(r) {
+  return Math.sqrt(GM * r) / (r - RS);
+}
+function celerityFromSpeed(v) {
+  const gamma = 1 / Math.sqrt(Math.max(1e-9, 1 - v*v/(C*C)));
+  return v * gamma;
+}
+function gaussianRandom() {
+  let u = 0, v = 0;
+  while (u === 0) u = Math.random();
+  while (v === 0) v = Math.random();
+  return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+}
+
+///////////////////////////////////////////
+// =====================================================================
+// DISK RADIAL PROFILE  +  spawnParticle
+// ---------------------------------------------------------------------
+// Everything above spawnParticle() is module-scope state. buildDiskProfile()
+// must be called once from initPhysics()/resetAll(), and again whenever
+// bhSpin or R_SPAWN_MAX changes (the inner edge tracks the ISCO).
+// =====================================================================
+
+// ---- inner edge: the ISCO, not an arbitrary floor ---------------------------
+// A thin disk has a real inner edge at the innermost stable circular orbit.
+// Inside it there are no stable orbits at all, so material completes roughly one
+// more revolution and plunges; the surface density falls by orders of magnitude
+// rather than continuing to rise. Bardeen–Press–Teukolsky, prograde branch:
+//   r_isco/M = 3 + Z2 - sqrt((3 - Z1)(3 + Z1 + 2 Z2))
+// In these units M = GM = 0.5 and r_s = 1, so a* = 0 gives 3 r_s and the edge
+// migrates inward with spin: 1.92 r_s at a* = 0.6, 1.16 at 0.9, 0.62 at 0.998.
+function iscoRadius(aStar) {
+  const a = Math.min(0.998, Math.max(0, aStar));
+  const Z1 = 1 + Math.cbrt(1 - a*a) * (Math.cbrt(1 + a) + Math.cbrt(1 - a));
+  const Z2 = Math.sqrt(3*a*a + Z1*Z1);
+  return GM * (3 + Z2 - Math.sqrt(Math.max(0, (3 - Z1) * (3 + Z1 + 2*Z2))));
+}
+
+// ---- radial sampling profile ------------------------------------------------
+// dN/d(ln r)  ∝  r^DISK_SAMPLING_INDEX · f(r) · ring(r),   f = 1 - sqrt(r_in/r)
+//
+// f is the zero-torque inner boundary condition: no stress can be transmitted
+// across the ISCO, so dissipation (and surface density) vanish there. It is what
+// gives the disk a soft inner edge instead of a wall, and it puts the emission
+// peak at r = (49/36)·r_in ≈ 1.36 r_in, not at the edge itself.
+//
+// DISK_SAMPLING_INDEX is a SAMPLING choice, not physics, and it is a genuine
+// trade-off because every particle carries the same mass:
+//   0     — log-uniform. Best inner-region resolution, but implies Σ ∝ r^-2,
+//           steeper than any real disk, so the density map over-weights the
+//           centre and self-gravity reads too concentrated.
+//   1.25  — equal-mass sampling of a Shakura–Sunyaev outer-region disk
+//           (Σ ∝ r^-3/4 ⇒ dN/dr ∝ r^1/4). Physically honest, but most particles
+//           land far out where they are small and dim, and the inner disk goes
+//           grainy at fixed N.
+// 0.5 is a compromise. Set it to 1.25 if you care more about the self-gravity
+// being right than about inner-region sampling density.
+const DISK_SAMPLING_INDEX = 0.5;
+
+// Outer taper. Without it the r^INDEX factor keeps rising and material piles up
+// against R_SPAWN_MAX as a hard-edged wall. Real disks have no outer edge either:
+// the Lynden-Bell & Pringle viscous similarity solution gives
+// Σ ∝ r^-γ exp(-(r/R_c)^(2-γ)), so an exponential roll-off is the standard shape,
+// and it lets R_SPAWN_MAX stay what it is -- a visibility cutoff, not a boundary.
+const DISK_OUTER_TAPER = 0.55;   // × R_SPAWN_MAX = the roll-off radius R_c
+
+// ---- ring structure ---------------------------------------------------------
+// Rings in black-hole accretion art are mostly convention — a steady thin disk
+// has a smooth Σ(r), and most "rings" in renders are lensing features (the
+// photon ring, the secondary image of the far side) rather than real density
+// structure. But narrow quasi-axisymmetric bands are a real phenomenon in
+// accretion flows: MRI turbulence organises into zonal flows, and the
+// radiation-pressure instability drives banded limit cycles in the inner disk.
+// Protoplanetary disks show them unambiguously (ALMA/HL Tau). So: defensible as
+// an evolved structure, not as a steady-state solution.
+//
+// Generated as a sum of Gaussian bumps in ln r rather than a warped coordinate.
+// A coordinate warp like r -> r + sin(a·r^(1+ε)) has two problems: it is exactly
+// periodic (reads as machined), and once the map's derivative goes negative it
+// folds, producing uncontrolled caustic spikes in density. Modulating the PDF
+// and sampling by inverse-CDF avoids both — amplitude, width and position are
+// independent per ring, and negative amplitudes give gaps rather than folds.
+// Roughly log-periodic spacing is deliberate: resonant and instability-driven
+// structure tends to be self-similar in radius, not equally spaced in r.
+const RING_COUNT = 6;
+const RING_CONTRAST = 0.6;    // peak |amplitude|; 0 = smooth disk
+const RING_MIN_CONTRAST = 0.3; // amplitudes never land near zero (invisible rings)
+const ringLogCentre = new Float64Array(RING_COUNT);
+const ringAmplitude = new Float64Array(RING_COUNT);
+const ringInvWidth  = new Float64Array(RING_COUNT);  // reciprocal, so the hot loop divides never
+
+const PROFILE_BINS = 384;
+let diskInnerEdge = 3 * RS;
+let profileLogMin = 0, profileLogSpan = 1;
+
+// ---- sampling table ---------------------------------------------------------
+// The CDF is inverted ONCE at build time onto a uniform grid in u, so drawing a
+// radius is a table lookup plus one lerp -- no binary search, no branch, no
+// transcendental. This is the difference between a spawn costing ~10 ns and
+// ~150 ns, which matters when a full disk regeneration is 50k+ calls.
+const INVCDF_BINS = 1024;
+const invCDFLogR = new Float64Array(INVCDF_BINS + 1);
+
+// Compact quartic bump instead of exp(-d²/2): identical shape to the eye, zero
+// outside |d| > 1, and no transcendental. The profile build is only ~2300
+// evaluations so this is not where the time goes -- it is just free.
+function ringBump(d) {
+  const a = d < 0 ? -d : d;
+  if (a >= 1) return 0;
+  const t = 1 - a*a;
+  return t * t;
+}
+
+function ringModulation(lnR) {
+  let m = 1;
+  for (let k = 0; k < RING_COUNT; k++) {
+    m += ringAmplitude[k] * ringBump((lnR - ringLogCentre[k]) * ringInvWidth[k]);
+  }
+  return m < 0.05 ? 0.05 : m;   // never let a gap go completely empty
+}
+
+// The profile is rebuilt lazily and at most once per dirty-flag flip. Rebuilding
+// it costs ~2300 bump evaluations; calling it once per particle instead of once
+// per reset is a 50000x multiplier and turns a 1 ms job into an 8 s freeze, so
+// the guard is here rather than in a comment. Flip the flag from resetAll(), the
+// spin slider, and anything that moves R_SPAWN_MAX / velNoise.
+let diskProfileDirty = true;
+function markDiskProfileDirty() { diskProfileDirty = true; }
+function ensureDiskProfile() { if (diskProfileDirty) buildDiskProfile(); }
+
+function buildDiskProfile() {
+  diskProfileDirty = false;
+  // R_SPAWN_MIN stays a hard floor; the ISCO takes over whenever it is larger.
+  diskInnerEdge = Math.max(R_SPAWN_MIN, iscoRadius(bhSpin));
+  profileLogMin = Math.log(diskInnerEdge);
+  profileLogSpan = Math.log(R_SPAWN_MAX) - profileLogMin;
+
+  // Rings: log-periodic skeleton, then jitter everything about it.
+  //
+  // Width is tied to the epicyclic smearing they have to survive. A velocity
+  // perturbation of velNoise gives eccentricity e ~ 2*velNoise, i.e. a radial
+  // excursion of +/- 2*velNoise in ln r, and any ring narrower than that is
+  // erased inside the first orbit -- which is why the previous 6-16% wide rings
+  // were invisible at the default velNoise = 0.08 (+/-16%).
+  //
+  // Amplitude keeps a minimum magnitude: drawing uniformly on [-A, A] put
+  // several rings near zero contrast every time, so only two or three of nine
+  // were ever visible.
+  const cell = profileLogSpan / RING_COUNT;
+  const smear = 2.0 * velNoise;
+  for (let k = 0; k < RING_COUNT; k++) {
+    ringLogCentre[k] = profileLogMin + cell * (k + 0.5) + (Math.random() - 0.5) * cell * 0.6;
+    const mag = RING_MIN_CONTRAST + (RING_CONTRAST - RING_MIN_CONTRAST) * Math.random();
+    ringAmplitude[k] = Math.random() < 0.5 ? -mag : mag;
+    // quartic bump has compact support, so its half-width is the full extent
+    const w = Math.max(cell * 0.55, smear * 1.6) * (0.85 + 0.4 * Math.random());
+    ringInvWidth[k] = 1 / w;
+  }
+
+  // cumulative distribution over ln r, trapezoid rule
+  const cdf = new Float64Array(PROFILE_BINS + 1);
+  const rc = DISK_OUTER_TAPER * R_SPAWN_MAX;
+  const invRc2 = 1 / (rc * rc);
+  let prev = 0;
+  for (let b = 0; b <= PROFILE_BINS; b++) {
+    const lnR = profileLogMin + profileLogSpan * (b / PROFILE_BINS);
+    const r = Math.exp(lnR);
+    let f = 1 - Math.sqrt(diskInnerEdge / r);            // zero-torque edge
+    if (f < 0) f = 0;
+    const w = Math.pow(r, DISK_SAMPLING_INDEX) * f
+            * Math.exp(-r * r * invRc2)                  // viscous outer roll-off
+            * ringModulation(lnR);
+    const wSafe = (w >= 0 && isFinite(w)) ? w : 0;
+    if (b > 0) cdf[b] = cdf[b-1] + 0.5 * (prev + wSafe);
+    prev = wSafe;
+  }
+  const total = cdf[PROFILE_BINS];
+
+  // Degenerate-profile guard. This is not paranoia: a single NaN anywhere in the
+  // weight (velNoise undefined at build time, R_SPAWN_MAX below the ISCO, spin
+  // out of range) makes every comparison in the inversion below false, so src
+  // never advances and t falls to 0 -- the whole table collapses to a single
+  // value and every particle spawns at the same radius:
+  // Fail loudly and fall back to the simple log-uniform distribution.
+  if (!(total > 0) || !isFinite(total)) {
+    for (let j = 0; j <= INVCDF_BINS; j++) {
+      invCDFLogR[j] = profileLogMin + profileLogSpan * (j / INVCDF_BINS);
+    }
+    console.warn('buildDiskProfile: degenerate weight (total =', total,
+                 ', innerEdge =', diskInnerEdge, ') — using log-uniform fallback.');
+    return;
+  }
+
+  // Invert onto a uniform grid in u. Single forward walk, O(bins), done once.
+  let src = 0;
+  for (let j = 0; j <= INVCDF_BINS; j++) {
+    const target = (j / INVCDF_BINS) * total;
+    while (src < PROFILE_BINS && cdf[src + 1] < target) src++;
+    const c0 = cdf[src], c1 = cdf[src + 1];
+    const t = c1 > c0 ? (target - c0) / (c1 - c0) : 0;
+    invCDFLogR[j] = profileLogMin + profileLogSpan * ((src + t) / PROFILE_BINS);
+  }
+}
+
+// Draw a radius: one multiply, one truncation, one lerp, one exp. No search.
+// The dirty-flag check lives HERE, at the point of use, so the table can never
+// be read before it is built no matter who calls what in which order. An
+// unbuilt table is zero-filled, and exp(0) = 1, so the failure mode is every
+// particle spawning at r = 1 r_s and being clamped to SAFE_SPAWN_FLOOR --
+// indistinguishable on screen from a deliberate thin ring.
+function sampleDiskRadius() {
+  if (diskProfileDirty) buildDiskProfile();
+  const t = Math.random() * INVCDF_BINS;
+  const i = t | 0;
+  const f = t - i;
+  return Math.exp(invCDFLogR[i] + f * (invCDFLogR[i + 1] - invCDFLogR[i]));
+}
+
+// Cheap normal deviate. Box-Muller costs a log, a cos and a sqrt; the sum of
+// three uniforms has mean 1.5 and variance 1/4, so (sum - 1.5) * 2 is unit
+// variance for three Math.random() calls and no transcendentals. Support is
+// +/-3 sigma, which for scattering spawn positions is a feature: no runaway tail
+// to be caught by the SAFE_SPAWN_FLOOR clamp below.
+function fastGaussian() {
+  return (Math.random() + Math.random() + Math.random() - 1.5) * 2;
+}
+
+// =====================================================================
+
+function spawnParticle(i, init = true) {
+  // Three modes, unchanged in intent:
+  //   init && !sphericalSpawn  — disk, sampled from the profile above
+  //   init && sphericalSpawn   — isotropic prograde cloud, same radial profile
+  //   !init                    — respawn at the outer edge of a running sim
+  //
+  // Respawn is spread over the outermost decade rather than dropped exactly on
+  // R_SPAWN_MAX: a delta function there builds a visible shell of fresh material
+  // that then sweeps inward as a coherent front. The spread is in ln r so it
+  // matches the profile's own measure.
+  const r = init
+    ? sampleDiskRadius()
+    : R_SPAWN_MAX * Math.exp(-0.12 * Math.random());
+  const vmag = vCircular(r);
+
+  let x, y, z, vx, vy, vz;
+  if (sphericalSpawn) {
+    // isotropic cloud: random point on the sphere of radius r, with a circular
+    // orbit in a RANDOMLY oriented plane. This populates all inclinations so the
+    // Kerr frame-dragging (nodal precession of tilted orbits) becomes visible.
+    const u = Math.random()*2 - 1, phi = Math.random()*Math.PI*2;
+    const s = Math.sqrt(Math.max(0, 1 - u*u));
+    const rx = s*Math.cos(phi), ry = u, rz = s*Math.sin(phi);   // unit radial
+    x = r*rx; y = r*ry; z = r*rz;
+    // velocity perpendicular to r, in a random orbital-plane orientation
+    let tx = Math.random()*2-1, ty = Math.random()*2-1, tz = Math.random()*2-1;
+    const d = tx*rx + ty*ry + tz*rz;
+    tx -= d*rx; ty -= d*ry; tz -= d*rz;
+    let tl = Math.hypot(tx, ty, tz);
+    if (tl < 1e-3) { tx = -rz; ty = 0; tz = rx; tl = Math.hypot(tx, ty, tz) || 1; } // r∥random guard
+    // Single handedness: all inclinations are populated, but every orbit is
+    // PROGRADE about the spin/disk axis. L = r x v, so requiring L·n̂ > 0 and
+    // flipping the tangent otherwise gives a cloud that shares one sense of
+    // rotation instead of two counter-rotating halves cancelling to zero net
+    // angular momentum.
+    const lDotN = (ry*tz - rz*ty)*diskNormal[0]
+                + (rz*tx - rx*tz)*diskNormal[1]
+                + (rx*ty - ry*tx)*diskNormal[2];
+    if (lDotN < 0) { tx = -tx; ty = -ty; tz = -tz; }
+    vx = vmag*tx/tl; vy = vmag*ty/tl; vz = vmag*tz/tl;
+  } else {
+    const az = Math.random() * Math.PI * 2;
+    x = r * Math.cos(az); y = 0; z = r * Math.sin(az);
+    // orbital direction inverted (vs the naive -sin/+cos tangent) purely
+    // cosmetically, so the disk's north pole faces up in the default view
+    vx = Math.sin(az) * vmag; vy = 0; vz = -Math.cos(az) * vmag;
+  }
+
+  // Vertical scatter is scaled to h/r rather than r so the disk keeps a constant
+  // opening angle; in-plane scatter would smear the rings straight back out, so
+  // it is applied only along the disk normal for the flat spawn. The spherical
+  // mode has no plane to preserve, so it keeps the isotropic jitter.
+  if (sphericalSpawn) {
+    x += fastGaussian() * posNoise * r;
+    y += fastGaussian() * posNoise * r;
+    z += fastGaussian() * posNoise * r;
+  } else {
+    const jz = fastGaussian() * posNoise * r;
+    x += jz * diskNormal[0];
+    y += jz * diskNormal[1];
+    z += jz * diskNormal[2];
+  }
+
+  vx += fastGaussian() * velNoise * vmag;
+  vy += fastGaussian() * velNoise * vmag;
+  vz += fastGaussian() * velNoise * vmag;
+
+  // hard safety clamp: regardless of how far the Gaussian tail pushed the
+  // radius inward, never let a particle spawn below the floor. Preserves
+  // direction, just pushes the radius back out.
+  const rNoisy = Math.hypot(x, y, z);
+  if (rNoisy < SAFE_SPAWN_FLOOR) {
+    const scale = SAFE_SPAWN_FLOOR / Math.max(rNoisy, 1e-6);
+    x *= scale; y *= scale; z *= scale;
+  }
+
+  pos[i*3+0] = x; pos[i*3+1] = y; pos[i*3+2] = z;
+
+  const speedMag = Math.hypot(vx, vy, vz);
+  const cel = celerityFromSpeed(Math.min(speedMag, 0.999 * C));
+  const norm = speedMag || 1;
+  q[i*3+0] = (vx/norm) * cel;
+  q[i*3+1] = (vy/norm) * cel;
+  q[i*3+2] = (vz/norm) * cel;
+
+  tau[i] = 0;
+}
+
+///////////////////////////////////////////
+
+function initPhysics() {
+  buildDiskProfile();
+  pos = new Float32Array(N*3);
+  q = new Float32Array(N*3);
+  tau = new Float32Array(N);
+  gFactor = new Float32Array(N).fill(1);
+  pgCell = new Int32Array(N).fill(-1);
+  pgRing = new Int32Array(N).fill(-1);
+  pgZ = new Float32Array(N);
+  for (let i = 0; i < N; i++) spawnParticle(i);
+}
+
+function step(dt) {
+  let insideCount = 0, gSum = 0;
+
+  // Kerr horizon (oblate spheroid; spin ∥ diskNormal = y). Outer horizon
+  // r₊ = M + √(M²−a²) shrinks with spin; equatorial radius √(r₊²+a²) exceeds
+  // the polar radius r₊. Reduces exactly to the sphere r=RS at a=0. Used below
+  // for the redshift/throttle term and the hard absorption check, so polar
+  // material falls deeper before fading than equatorial material does.
+  const aLenH = bhSpin * GM;
+  const rPlusH = GM + Math.sqrt(Math.max(0, GM*GM - aLenH*aLenH));
+  const hEq2 = rPlusH*rPlusH + aLenH*aLenH; // equatorial radius²  (= RS² at a=0)
+  const hPol2 = rPlusH*rPlusH;              // polar radius²       (= RS² at a=0)
+  const kerrHorizon = bhSpin > 0;
+
+  //particle mechanics:
+  // todo: more sophisticated viscosity, disk bias, falling-in trajectories
+  // also includes an approximation of Kerr metric frame-dragging (nice to have, but gives no perceptible result, you'd have to track a given particle for a couple of orbits for this to become apparent).
+  for (let i = 0; i < N; i++) {
+    const ix = i*3;
+    const px = pos[ix], py = pos[ix+1], pz = pos[ix+2];
+    const r = Math.hypot(px, py, pz);
+    const insideHitbox = r < R_HITBOX;
+
+    // g = dτ/dt computed from START-of-step state (before this step's own
+    // force is applied) — this is the coordinate/proper-time conversion
+    // factor used below to throttle BOTH the momentum and position updates.
+    // Without this, the sim silently treated coordinate time t and proper
+    // time τ as the same thing, which is why infalling particles used to
+    // just plunge and vanish instead of visibly slowing/redshifting first.
+    const qx0 = q[ix], qy0 = q[ix+1], qz0 = q[ix+2];
+    const qMag0 = Math.sqrt(qx0*qx0 + qy0*qy0 + qz0*qz0);
+    const gamma0 = Math.sqrt(1 + qMag0*qMag0 / (C*C));
+    const vx0 = qx0/gamma0, vy0 = qy0/gamma0, vz0 = qz0/gamma0;
+    const speedFrac0 = Math.hypot(vx0, vy0, vz0) / C;
+    // horizon-proximity term. At a=0 this is RS/r (spherical). Under spin it
+    // becomes rH(dir)/r for the oblate horizon, i.e. 1/√(ρ²/r_eq² + y²/r_pol²),
+    // so the lapse collapses on the oblate surface, not a sphere.
+    let horizonTerm;
+    if (kerrHorizon) {
+      const rho2h = px*px + pz*pz; // equatorial distance² (spin ∥ y)
+      horizonTerm = 1 / Math.sqrt(Math.max(1e-12, rho2h/hEq2 + (py*py)/hPol2));
+    } else {
+      horizonTerm = RS / Math.max(r, 1e-6);
+    }
+// dτ/dt factorises: gravitational lapse × local Lorentz factor. The old
+    // additive form (1 - r_s/r - v²) is the weak-field expansion of this, missing
+    // the (r_s/r)v² cross term — so it reaches ZERO at finite radius (r = 2 r_s
+    // for free fall, 1.5 r_s for a circular orbit) and the g-throttled position
+    // update stalls particles there, short of R_INNER_KILL. The product vanishes
+    // only at the horizon itself, which is the frozen-star behaviour we want.
+    const gGrav = Math.max(0, 1 - horizonTerm);
+    const gKin  = Math.max(0, 1 - speedFrac0*speedFrac0);
+    const g = Math.sqrt(Math.max(1e-6, gGrav * gKin));
+    gFactor[i] = g;
+    tau[i] += g * dt;
+
+    let accelMag;
+    if (insideHitbox) {
+      const rSafe = Math.max(r - RS, 0.05);
+      accelMag = GM / (rSafe*rSafe);
+    } else {
+      accelMag = GM / Math.max(r*r, 1e-6);
+    }
+    let invR3term = accelMag / Math.max(r, 1e-6);
+
+    // Disk monopole: the enclosed disk mass pulls like extra central mass.
+    // Newton's shell result does not hold for a flattened body, but inside a
+    // thin disk the enclosed-mass approximation is the standard first cut and
+    // it is what makes k_disk mean "how much does the disk's gravity matter
+    // next to the hole's". At k_disk = 1 this is a ~50% boost to the effective
+    // central mass at mid-disk, so orbits go visibly non-Keplerian and the
+    // vertical epicyclic frequency rises with it.
+    if (kDisk > 0) {
+      invR3term += enclosedDiskMass(r) / Math.max(r*r*r, 1e-12);
+    }
+
+    let ax = -px * invR3term;
+    let ay = -py * invR3term;
+    let az = -pz * invR3term;
+
+    // ---- disk self-gravity: vertical pull toward the MEASURED disk plane -----
+    // Replaces the old ad-hoc harmonic bias. For a thin sheet of surface density
+    // Sigma the vertical field just off the plane is 2*pi*G*Sigma, independent of
+    // height -- so the profile is flat outside the disk and linear inside it,
+    // which is exactly tanh(z/h). Sigma comes from the polar map and h from that
+    // ring's <z^2>, so both are measured per frame rather than assumed.
+    //
+    // This is genuinely weaker than the old spring at small kDisk and genuinely
+    // stronger at large kDisk, because it now means something: at kDisk = 1 the
+    // disk masses as much as the hole.
+    if (pgCell[i] >= 0 && (kDisk > 0 || dragStrength > 0)) {
+      const nrm = diskNormalLive;
+      let aV = 0;
+      // (a) CONSERVATIVE: the disk's own vertical gravity. Genuinely weak unless
+      //     the disk is a sizeable fraction of M_BH -- which is the honest answer,
+      //     and why the slider only bites in its upper range.
+      if (kDisk > 0) {
+        aV -= TWO_PI * pgSigma[pgCell[i]] * Math.tanh(pgZ[i] / pgRingH[pgRing[i]]);
+      }
+      // (b) DISSIPATIVE: viscous settling, and the term that actually flattens the
+      //     disk. For a point-mass potential the vertical epicyclic frequency is
+      //     just the orbital frequency, so damping at 2*zeta*Omega gives a settling
+      //     time of a fixed number of ORBITS at every radius rather than a fixed
+      //     number of ticks -- the inner disk flattens first, as it should.
+      if (dragStrength > 0) {
+        const omega = Math.sqrt(GM / Math.max(r*r*r, 1e-12));
+        const qh = qx0*nrm[0] + qy0*nrm[1] + qz0*nrm[2];
+        aV -= 2.0 * DISK_SETTLE_ZETA * dragStrength * omega * qh;
+      }
+      ax += aV * nrm[0];
+      ay += aV * nrm[1];
+      az += aV * nrm[2];
+    }
+
+    // viscosity/drag heuristic: proportional to velocity AT THE START of this
+    // step, scaled by the coarse local density built once per frame.
+    if (dragStrength > 0) {
+      // Radial profile (smooth background, unchanged and already tuned) times the
+      // LOCAL azimuthal contrast from the polar map: a particle sitting in a clump
+      // or an arm sees denser gas than the ring average and drags harder, which is
+      // the whole point of keeping an (R,phi) map rather than a radial histogram.
+      const contrast = pgCell[i] >= 0 ? pgContrast[pgCell[i]] : 1;
+      const localDensity = dragBinDensityNorm[densityBinIndex(r)] * contrast;
+      const dragScale = -dragStrength * DRAG_SCALE * localDensity;
+      ax += dragScale * vx0;
+      ay += dragScale * vy0;
+      az += dragScale * vz0;
+    }
+
+    // Kerr frame-dragging (gravitomagnetic) — the leading, linear-in-spin effect.
+    // Skipped for a==0 (Schwarzschild case).
+    /* 
+    The rotating BH drags spacetime via a dipole gravitomagnetic field:
+	     B_g = (2·GM·a_len/r³)[3(Ŝ·r̂)r̂ − Ŝ] 
+     about the spin axis Ŝ (= disk normal); the velocity-dependent force a_gm = −v×B_g does no work (⊥ v). 
+     This is the leading term: in the equatorial plane the Kerr potential g_tt is unchanged by spin, so there is nothing to add there — the spin enters only through this off-diagonal (frame-dragging) piece. a_len = a·GM.
+    */
+    if (bhSpin > 0) {
+      const aLen = bhSpin * GM;                       // length spin a = a*·M (G=1 ⇒ M=GM)
+      const coef = 2 * GM * aLen / (r*r*r);           // = 2·GM²·a*/r³, fixed in internal units
+      const sdotr = (px*diskNormal[0] + py*diskNormal[1] + pz*diskNormal[2]) / Math.max(r, 1e-6);
+      const bgx = coef * (3*sdotr*px/r - diskNormal[0]);
+      const bgy = coef * (3*sdotr*py/r - diskNormal[1]);
+      const bgz = coef * (3*sdotr*pz/r - diskNormal[2]);
+      ax -= (vy0*bgz - vz0*bgy);   // a_gm = −v × B_g  (start-of-step velocity)
+      ay -= (vz0*bgx - vx0*bgz);
+      az -= (vx0*bgy - vy0*bgx);
+    }
+
+    // convert the proper-time force law (what the PW potential and the
+    // heuristic terms above naturally express) into a coordinate-time rate:
+    // dq/dt = (dτ/dt)(dq/dτ) = g * a. 
+    //Outside the hitbox g ≈ 1, this only matters where g deviates from 1.
+    ax *= g; ay *= g; az *= g;
+
+    q[ix]   += ax * dt;
+    q[ix+1] += ay * dt;
+    q[ix+2] += az * dt;
+
+    const qx = q[ix], qy = q[ix+1], qz = q[ix+2];
+    const qMag2 = qx*qx + qy*qy + qz*qz;
+    const gamma = Math.sqrt(1 + qMag2 / (C*C));
+    const vx = qx / gamma, vy = qy / gamma, vz = qz / gamma;
+
+    // same conversion for position: dx/dt = g * v. Using the SAME start-of-
+    // step g as above (not a freshly recomputed one) for internal consistency
+    // within a single step.
+    let nx = px + g*vx*dt, ny = py + g*vy*dt, nz = pz + g*vz*dt;
+    const nr = Math.hypot(nx, ny, nz);
+
+    if (insideHitbox) { insideCount++; gSum += g; }
+
+    // Blackout temperature now uses the LIVE temp0K:
+    // the slider is deliberately allowed to affect absorption, but the absorption
+    // branch below only fires INSIDE R_INNER_KILL, where all material is
+    // assumed to be infalling.
+    const tBlackout = temp0K * Math.pow(Math.max(r, 1e-3), -0.75) * g;
+
+    let breached;
+    if (kerrHorizon) {
+      breached = (nx*nx + nz*nz)/hEq2 + (ny*ny)/hPol2 <= 1.0; // inside oblate horizon
+    } else {
+      breached = nr <= RS;
+    }
+    if (breached) {
+      // emergency despawn — the only unconditional inner removal. A particle
+      // must never numerically end up inside the actual horizon, however it got
+      // there (e.g. an extreme sim-speed step). Ordinarily should never fire.
+      horizonBreachCount++;
+      spawnParticle(i, false);
+    } else if (nr < R_INNER_KILL && tBlackout < T_CUTOFF_K) {
+      // accretion: absorbed only when BOTH inside R_INNER_KILL AND blacked out.
+      // R_INNER_KILL is no longer an unconditional kill radius — it's just the
+      // outer bound within which blackout is even tested. Cold material OUTSIDE
+      // this radius (far & dim, but g≈1 and not infalling) is retained and left
+      // to escape and recycle at R_ESCAPE. Strictly inside 1.3 r_s here, so
+      // everything is genuinely infalling: near the horizon g collapses, driving
+      // tBlackout → 0 regardless of temp0K, so absorption still happens even at
+      // low slider values (no permanent freeze / performance sink at the horizon).
+      accretedMassKg += currentParticleMassKg;
+      absorbedCount++;
+      spawnParticle(i, false);
+    } else if (nr > R_ESCAPE) {
+      // escape recycle: the only remaining outer recycle. Escapees now land here
+      // instead of tripping the old blackout branch first, so safetyRecycleCount
+      // increments correctly and the accretion tally is no longer polluted by
+      // outbound material.
+      safetyRecycleCount++;
+      spawnParticle(i, false);
+    } else {
+      pos[ix] = nx; pos[ix+1] = ny; pos[ix+2] = nz;
+    }
+  }
+
+  lastInsideCount = insideCount;
+  lastAvgG = insideCount > 0 ? gSum / insideCount : 1;
+}
+
+// =====================================================================
+// LENSING 
+// mostly moved to shader code (particleVertexShader, duplicated in starVertexShader)
+// compute a 3D "apparent world position" per particle (by projecting into camera space, bending, then unprojecting back out). The project/unproject pair is self-consistent by construction, it's algebraically identical to three.js's own perspective projection (the aspect-ratio term cancels), so there's no drift between this JS calc and what the GPU actually draws.
+// =====================================================================
+
+// Deflection normalization. The deflection formula converges to the exact GR
+// weak-field value 2·r_s/b precisely at 1.0, so this is the single physical value
+// (any other breaks the weak-field limit).
+// used to be a cheat slider, now just kept as a named constant, the shader plumbing (uLensStrength) stays a harmless ×1.
+const lensStrength = 1.0;
+
+// =====================================================================
+// HIGHER-ORDER LENSED IMAGES 
+// Closed-form position of a point source's order-k image (strong-deflection limit, Bozza 2002). 
+// Positions are a GR approximation; brightness is heuristic (cheat), tunable per-order log-brightness offsets below.
+// =====================================================================
+
+const B_BAR = Math.log(216 * (7 - 4*Math.sqrt(3))) - Math.PI; // ≈ -0.4003
+// draw orders 1 and 2 (order 0 uses the thin-lens solve below)
+// orders 3 and higher add very subtle additional rings, in practice no longer discernible from order 5 or so.
+const MAX_IMAGE_ORDER = 2;
+
+// Order-0 (direct-image) thin-lens solve and the deflection-angle formula now
+// live only in the vertex shaders (solvePrimaryTheta / deflectionAngle in GLSL);
+// the JS copies were retired with the JS-path k=0 rendering.
+
+// hoBrightness: per-order brightness as ADDITIVE log10 offsets (our brightness pipeline is already logarithmic). 
+// 0.6 -> log10(0.6)≈-0.222; 0.2 -> log10(0.2)≈-0.699.
+// These are the tunable "cheat" — physically each order dims by ~e^-π≈0.04,
+// hoBrightness is the "keep" fraction per order, stacked MULTIPLICATIVELY:
+// order k is scaled by hoBrightness^k, i.e. offset by k*log10(hoBrightness) dex.
+// hoBrightness=1 means no reduction; nothing ever reaches exactly zero, so no
+// order winks out abruptly. (The old linear form max(0, 1-k*(1-h)) extinguished
+// order k at h = 1-1/k — order 2 at h=0.5 — which was the k=2 disappearance bug.)
+let hoBrightness = 0.04;
+
+// ---- observer clock --------------------------------------------------------
+// Simulation time IS the camera's proper time. The integrator advances
+// COORDINATE time (the clock of a static observer at infinity), and
+// dt_coord/dτ_cam = 1/lapse(r_cam), so a camera deep in the well must step
+// coordinate time faster: the whole disk speeds up. Same gate and sentinel as
+// the shader terms, computed once per frame so both stay consistent.
+let obsRsOverRcam = 0.0;   // 0 = remote-camera sentinel
+let obsTimeRate   = 1.0;   // dt_coord / dτ_cam = 1/√(1 − r_s/r_cam)
+
+// NOTE: the live higher-order brightness falloff now runs in the vertex shader
+// (uHoBright uniform). This JS version is kept as the reference formula:
+//function orderBrightnessScale(k) {return Math.pow(hoBrightness, k);}
+let ringImagesEnabled = true;   // toggle the per-particle higher-order images
+
+// SR Doppler + relativistic beaming 
+// (velocity-based; camera-relative, rendering-only, never feeds despawn). 
+let dopplerEnabled = true;
+// ---- display policy for physical brightness -> rgb -------------------------
+// Purely a rendering choice: which window of log10(visible-band luminosity)
+// gets the available sub-white rgb range, and where we give up and go white.
+// The disk spans ~12 decades (log10 L_vis ~ +2.4 at r=2.5 down to -10 at r=40),
+// so the window has to be chosen, not defaulted.
+let brightLo = -6.0;      // black point
+let brightHi = 8.0;       // full scale
+let whiteoutKnee = 0.75;  // display level where colour starts washing to white
+let brightGamma = 0.8;    // <1 flattens brightness differences (lifts faint detail)
+let falseAmt = 0.2;       // strength of the cold-particle false-colour floor
+let falseDark = 0.4;      // finished r+g+b below which a particle counts as "dark"
+let falseColdK = 3000;    // LOCAL REST temperature below which it counts as "cold"
+const FALSE_COLOR = [0.5, 0.5, 0.5];   // the baseline false colour itself
+let sizeGain = 0.25;       // 0 = fixed sprite size (previous behaviour)
+let beamingC = 3;             // δ^C beaming exponent. Physically ~3-4, but that's neither here nor there as long as we don't have a unified approach to representing brightness.
+
+let betaDopplerCutoff = 0.05;   // skip Doppler for particles slower than this (|β|); 
+				// just for minor performance gain, Doppler shift is mostly imperceptible below 0.05.
+				//the visible disk should run from about β≈0.09 (outer) to ≈0.6 (inner), but particles in the far outer disk are affected by this
+
+function alphaForOrder(k, psi) {
+  return (k % 2 === 1) ? k*Math.PI - psi : (k-1)*Math.PI + psi;
+}
+function impactParamForAlpha(alpha) {
+  return B_CRIT * (1 + Math.exp(B_BAR - alpha));
+}
+
+function getCameraFrame(camera, H) {
+  camera.updateMatrixWorld();
+  const e = camera.matrixWorld.elements;
+  const right = new THREE.Vector3(e[0], e[1], e[2]).normalize();
+  const up    = new THREE.Vector3(e[4], e[5], e[6]).normalize();
+  const fwd   = new THREE.Vector3(-e[8], -e[9], -e[10]).normalize(); // camera looks down local -Z
+  const vFovRad = THREE.MathUtils.degToRad(camera.fov);
+  const focal = (H / 2) / Math.tan(vFovRad / 2);
+  return { camPos: camera.position.clone(), right, up, fwd, focal };
+}
+
+// project a world point into (screenX, screenY, cameraSpaceDepth); null if behind camera
+function projectToScreen(wx, wy, wz, frame, W, H) {
+  const relx = wx - frame.camPos.x, rely = wy - frame.camPos.y, relz = wz - frame.camPos.z;
+  const xc = relx*frame.right.x + rely*frame.right.y + relz*frame.right.z;
+  const yc = relx*frame.up.x    + rely*frame.up.y    + relz*frame.up.z;
+  const zc = relx*frame.fwd.x   + rely*frame.fwd.y   + relz*frame.fwd.z;
+  if (zc <= 0.01) return null;
+  return {
+    x: W/2 + (xc/zc) * frame.focal,
+    y: H/2 - (yc/zc) * frame.focal,
+    z: zc
+  };
+}
+
+// inverse of projectToScreen: screen pixel + camera-space depth -> world position
+const _tmpApparent = new THREE.Vector3();
+function unprojectApparent(screenX, screenY, zc, frame, W, H, out) {
+  const xc = (screenX - W/2) * zc / frame.focal;
+  const yc = (H/2 - screenY) * zc / frame.focal;
+  out.copy(frame.camPos)
+     .addScaledVector(frame.right, xc)
+     .addScaledVector(frame.up, yc)
+     .addScaledVector(frame.fwd, zc);
+  return out;
+}
+
+// =====================================================================
+// THREE.JS SETUP
+// =====================================================================
+
+const container = document.getElementById('sceneContainer');
+let W = window.innerWidth, H = window.innerHeight;
+
+const scene = new THREE.Scene();
+const camera = new THREE.PerspectiveCamera(50, W / H, 0.1, 2000);
+
+const renderer = new THREE.WebGLRenderer({ antialias: true });
+renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+renderer.setSize(W, H);
+container.appendChild(renderer.domElement);
+
+// initial camera placement (spherical), matching the old default view
+{
+  const theta0 = 0.9, phi0 = 1.15, dist0 = 34;
+  camera.position.set(
+    dist0 * Math.sin(phi0) * Math.cos(theta0),
+    dist0 * Math.cos(phi0),
+    dist0 * Math.sin(phi0) * Math.sin(theta0)
+  );
+  camera.lookAt(0, 0, 0);
+}
+
+const controls = new OrbitControls(camera, renderer.domElement);
+controls.target.set(0, 0, 0);
+controls.enableDamping = true;
+controls.dampingFactor = 0.08;
+// Handles the common (unpanned) case smoothly: when the target sits on the BH,
+// OrbitControls clamps the dolly itself, which feels better than a hard veto.
+// The per-frame swept test in animate() catches everything else.
+controls.minDistance = R_FORBID;
+controls.maxDistance = 140;
+controls.autoRotateSpeed = 3.0;
+
+window.addEventListener('resize', () => {
+  W = window.innerWidth; H = window.innerHeight;
+  camera.aspect = W / H;
+  camera.updateProjectionMatrix();
+  renderer.setSize(W, H);
+  if (particleSystem) particleSystem.material.uniforms.uAttenScale.value = H * 0.9;
+});
+
+// ---- textures (generated once, on a scratch canvas) ----
+function makeDotTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grad.addColorStop(0.0, 'rgba(255,255,255,1)');
+  grad.addColorStop(0.7, 'rgba(255,255,255,1)');
+  grad.addColorStop(1.0, 'rgba(255,255,255,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 64, 64);
+  const tex = new THREE.CanvasTexture(c);
+  tex.needsUpdate = true;
+  return tex;
+}
+function makeShadowTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 64;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(32, 32, 0, 32, 32, 32);
+  grad.addColorStop(0.0, 'rgba(0,0,0,1)');
+  grad.addColorStop(0.85, 'rgba(0,0,0,1)');
+  grad.addColorStop(1.0, 'rgba(0,0,0,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 64, 64);
+  const tex = new THREE.CanvasTexture(c);
+  tex.needsUpdate = true;
+  return tex;
+}
+function makeGlowTexture() {
+  const c = document.createElement('canvas');
+  c.width = c.height = 128;
+  const g = c.getContext('2d');
+  const grad = g.createRadialGradient(64, 64, 0, 64, 64, 64);
+  grad.addColorStop(0.0, 'rgba(0,0,0,0.9)');
+  grad.addColorStop(0.4, 'rgba(0,0,0,0.55)');
+  grad.addColorStop(1.0, 'rgba(0,0,0,0)');
+  g.fillStyle = grad;
+  g.fillRect(0, 0, 128, 128);
+  const tex = new THREE.CanvasTexture(c);
+  tex.needsUpdate = true;
+  return tex;
+}
+
+// ---- hitbox wireframe (two static circles, built once) ----
+function buildCircle(radius, axis) {
+  const segs = 96;
+  const positions = new Float32Array((segs + 1) * 3);
+  for (let s = 0; s <= segs; s++) {
+    const a = (s / segs) * Math.PI * 2;
+    if (axis === 'xz') {
+      positions[s*3+0] = radius * Math.cos(a);
+      positions[s*3+1] = 0;
+      positions[s*3+2] = radius * Math.sin(a);
+    } else if (axis === 'yz') {
+      positions[s*3+0] = 0;
+      positions[s*3+1] = radius * Math.cos(a);
+      positions[s*3+2] = radius * Math.sin(a);
+    } else {
+      positions[s*3+0] = radius * Math.cos(a);
+      positions[s*3+1] = radius * Math.sin(a);
+      positions[s*3+2] = 0;
+    }
+  }
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+  return geo;
+}
+const hitboxMat = new THREE.LineBasicMaterial({ color: 0x7888c8, transparent: true, opacity: 0.32 });
+const hitboxGroup = new THREE.Group();
+hitboxGroup.add(new THREE.Line(buildCircle(R_HITBOX, 'xz'), hitboxMat));
+hitboxGroup.add(new THREE.Line(buildCircle(R_HITBOX, 'xy'), hitboxMat));
+scene.add(hitboxGroup);
+
+// ---- event-horizon wireframe (sphere at a=0, oblate spheroid at a>0) ----
+// Three unit rings (equator + two meridians) scaled live to the Kerr horizon:
+// equatorial √(r₊²+a²) along x,z and polar r₊ along y (the spin axis).
+const horizonMat = new THREE.LineBasicMaterial({ color: 0x7aff3c, transparent: true, opacity: 0.55 });
+const horizonGroup = new THREE.Group();
+horizonGroup.add(new THREE.Line(buildCircle(1, 'xz'), horizonMat)); // equator (x-z)
+horizonGroup.add(new THREE.Line(buildCircle(1, 'xy'), horizonMat)); // meridian (x-y)
+horizonGroup.add(new THREE.Line(buildCircle(1, 'yz'), horizonMat)); // meridian (y-z)
+horizonGroup.visible = false;
+scene.add(horizonGroup);
+
+// ---- camera exclusion zone wireframe -------------------------------------
+// Same construction as the horizon rings, same centre (the world origin), but
+// at R_FORBID. Toggle both on together: the exclusion sphere should appear as
+// a concentric cage 5x the radius of the green horizon, and the camera should
+// never get inside the amber one.
+const forbidMat = new THREE.LineBasicMaterial({ color: 0xffa32c, transparent: true, opacity: 0.45 });
+const forbidGroup = new THREE.Group();
+forbidGroup.add(new THREE.Line(buildCircle(R_FORBID, 'xz'), forbidMat));
+forbidGroup.add(new THREE.Line(buildCircle(R_FORBID, 'xy'), forbidMat));
+forbidGroup.add(new THREE.Line(buildCircle(R_FORBID, 'yz'), forbidMat));
+forbidGroup.visible = false;
+scene.add(forbidGroup);
+
+// ---- distribution visualization: three principal axes (from the shape tensor)
+// as colored double-ended lines, scaled live by rms extent, plus a wireframe
+// box showing the voxel-grid extent. Major axis red, mid green, minor blue —
+// so a flat disk reads as a short blue axis normal to a red/green plane.
+const _upV3 = new THREE.Vector3(0, 1, 0);
+const _diskNormalV3 = new THREE.Vector3(0, 1, 0);
+const shapeAxesGroup = new THREE.Group();
+const AXIS_COLORS = [0xff5555, 0x55ff88, 0x6688ff]; // major, mid, minor
+const shapeAxisLines = [];
+for (let k = 0; k < 3; k++) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(6), 3).setUsage(THREE.DynamicDrawUsage));
+  const line = new THREE.Line(geo, new THREE.LineBasicMaterial({ color: AXIS_COLORS[k] }));
+  shapeAxisLines.push(line);
+  shapeAxesGroup.add(line);
+}
+// polar-map extent: inner and outer rings drawn in the LIVE disk plane, so the
+// annulus visibly tilts with the measured normal instead of sitting in a fixed
+// box. Built in the xz plane and re-oriented each frame by diskMapGroup's
+// quaternion (see the animate loop).
+const diskMapGroup = new THREE.Group();
+{
+  const mat = new THREE.LineBasicMaterial({ color: 0x445566, transparent: true, opacity: 0.45 });
+  for (const rad of [PG_R_MIN, PG_R_MAX]) {
+    const seg = 96, gp = new Float32Array((seg+1)*3);
+    for (let k = 0; k <= seg; k++) {
+      const a = k/seg * Math.PI*2;
+      gp[k*3] = rad*Math.cos(a); gp[k*3+1] = 0; gp[k*3+2] = rad*Math.sin(a);
+    }
+    const g = new THREE.BufferGeometry();
+    g.setAttribute('position', new THREE.BufferAttribute(gp, 3));
+    diskMapGroup.add(new THREE.Line(g, mat));
+  }
+  shapeAxesGroup.add(diskMapGroup);
+}
+scene.add(shapeAxesGroup);
+
+// ---- particles: one instanced THREE.Points; N per-particle vertices drawn
+// as 3 instances (one per image order). Buffer is N (was 3N). ----
+const dotTexture = makeDotTexture();
+let particleGeometry, particleSystem;
+
+const COLOR_WHITE  = [1.0, 1.0, 1.0];
+
+const P_BASE_SIZE = 0.2; // particle size (three.js units)
+const HO_PIXEL_SIZE = 6.0; // screen-space px size for higher-order images at the reference distance
+const HO_REF_DIST = 15.0; // camera distance (r_s) at/below which HO images render full size;
+                          // beyond it they shrink ∝ 1/r_C so the shrinking photon ring doesn't white out
+
+const particleFragmentShader = `
+  varying vec3 vColor;
+  uniform sampler2D uTex;
+  void main() {
+    vec4 t = texture2D(uTex, gl_PointCoord);
+    gl_FragColor = vec4(vColor * t.a, 1.0);
+  }
+`;
+
+// ===== Kerr critical curve (n→∞ photon-ring shape) as a per-frame LUT =====
+/*
+Bardeen's spherical-photon-orbit conserved quantities ξ(r), η(r) parametrize the shadow boundary for an observer at inclination θo. We reduce that curve to r_crit(φ), viz. impact parameter as a function of image-plane azimuth, and upload it as a 1×N  float texture the higher-order shader samples to warp the ring onto the correct offset/D-shape. 
+At a=0 the LUT is flat at b_crit, i.e. a circle (Schwarzschild case).
+*/
+const CRIT_LUT_N = 128;
+const critLUTData = new Float32Array(CRIT_LUT_N * 4);
+for (let i = 0; i < CRIT_LUT_N; i++) critLUTData[i*4] = B_CRIT; // start as a circle
+const critLUTTex = new THREE.DataTexture(critLUTData, CRIT_LUT_N, 1, THREE.RGBAFormat, THREE.FloatType);
+critLUTTex.magFilter = THREE.LinearFilter;
+critLUTTex.minFilter = THREE.LinearFilter;
+critLUTTex.wrapS = THREE.RepeatWrapping;     // φ wraps at 0 / 2π
+critLUTTex.needsUpdate = true;
+let critLUTSpin = -1, critLUTTheta = -999;   // dirty-check cache
+
+function kerrXiEta(r, a) {
+  const xi  = (r*r*(3*GM - r) - a*a*(r + GM)) / (a*(r - GM));
+  const eta = r*r*r*(4*GM*a*a - r*(r-3*GM)*(r-3*GM)) / (a*a*(r-GM)*(r-GM));
+  return [xi, eta];
+}
+const _critPhi = [], _critR = [];
+// Rebuild r_crit(φ) for the current spin a* and observer inclination θo (radians
+// from the spin axis). Skips work when neither changed appreciably.
+function updateCritLUT(bhSpin, thetaO) {
+  if (Math.abs(bhSpin - critLUTSpin) < 1e-4 &&
+      Math.abs(thetaO - critLUTTheta) < 0.5*Math.PI/180) return;
+  critLUTSpin = bhSpin; critLUTTheta = thetaO;
+  if (bhSpin < 1e-4) {  // Scharzschild case
+    for (let i = 0; i < CRIT_LUT_N; i++) critLUTData[i*4] = B_CRIT; // restore circle (seems wasteful, just give the shader a "Schwarzschild pass" that skips this entirely?)
+    critLUTTex.needsUpdate = true; return;
+  }
+  const a = bhSpin * GM;
+  const th = Math.max(thetaO, 2*Math.PI/180), s = Math.sin(th), c = Math.cos(th), cot = c/s;
+  const rPlus = GM + Math.sqrt(Math.max(0, GM*GM - a*a));
+  const rlo = rPlus + 1e-4, rhi = GM*15, Ns = 1200;
+  _critPhi.length = 0; _critR.length = 0;
+  for (let i = 0; i <= Ns; i++) {
+    const r = rlo + (rhi - rlo)*i/Ns;
+    const [xi, eta] = kerrXiEta(r, a);
+    const arg = eta + a*a*c*c - xi*xi*cot*cot;   // β² ≥ 0 gates the physical range
+    if (arg < 0) continue;
+    const al = -xi/s, be = Math.sqrt(arg), rc = Math.hypot(al, be);
+    _critPhi.push((Math.atan2(be, al) + 2*Math.PI) % (2*Math.PI)); _critR.push(rc);
+    if (be > 1e-9) { _critPhi.push((Math.atan2(-be, al) + 2*Math.PI) % (2*Math.PI)); _critR.push(rc); }
+  }
+  const idx = _critPhi.map((_, k) => k).sort((p, q) => _critPhi[p] - _critPhi[q]);
+  const ph = idx.map(k => _critPhi[k]), rr = idx.map(k => _critR[k]);
+  const NP = ph.length;
+  for (let i = 0; i < CRIT_LUT_N; i++) {
+    const phi = 2*Math.PI*(i + 0.5)/CRIT_LUT_N; // texel centre
+    let val;
+    if (phi <= ph[0] || phi >= ph[NP-1]) {       // wrap segment across φ=0
+      const a0 = ph[NP-1] - 2*Math.PI, f = (phi - a0) / ((ph[0] - a0) || 1);
+      val = rr[NP-1] + (rr[0] - rr[NP-1])*f;
+    } else {
+      let lo = 0, hi = NP - 1;
+      while (hi - lo > 1) { const m = (lo+hi)>>1; if (ph[m] <= phi) lo = m; else hi = m; }
+      const f = (phi - ph[lo]) / ((ph[hi] - ph[lo]) || 1);
+      val = rr[lo] + (rr[hi] - rr[lo])*f;
+    }
+    critLUTData[i*4] = val;
+  }
+  critLUTTex.needsUpdate = true;
+}
+
+function buildParticleSystem() {
+  if (particleSystem) {
+    scene.remove(particleSystem);
+    particleGeometry.dispose();
+  }
+  particleGeometry = new THREE.InstancedBufferGeometry();
+  // position and aVel are the physics arrays (p, q), we used to keep copies of these around, but we now write to them directly; flagging needsUpdate each frame uploads them.
+
+  particleGeometry.setAttribute('position',   new THREE.BufferAttribute(pos, 3).setUsage(THREE.DynamicDrawUsage));
+  particleGeometry.setAttribute('aVel',       new THREE.BufferAttribute(q, 3).setUsage(THREE.DynamicDrawUsage));
+
+  // instanced attribute: which image order (0,1,2), one value per instance
+  const orders = new Float32Array(MAX_IMAGE_ORDER + 1);
+  for (let k = 0; k <= MAX_IMAGE_ORDER; k++) orders[k] = k;
+  particleGeometry.setAttribute('aInstanceOrder', new THREE.InstancedBufferAttribute(orders, 1));
+  particleGeometry.instanceCount = MAX_IMAGE_ORDER + 1; // adjusted per-frame by the ring toggle
+
+  const material = new THREE.ShaderMaterial({
+    uniforms: {
+      uTex: { value: dotTexture },
+      tempLUT: { value: tempLUT },
+      uAttenScale: { value: H * 0.9 },
+      uCamPos: { value: new THREE.Vector3() },
+      uBcrit: { value: B_CRIT },
+      uBbar: { value: B_BAR },
+      uRs: { value: RS },
+      uHoBright: { value: hoBrightness },
+      uPBaseSize: { value: P_BASE_SIZE },
+      uHoPixelSize: { value: HO_PIXEL_SIZE },
+      uHoRefDist: { value: HO_REF_DIST },
+      uBhSpin: { value: bhSpin },
+      uCritLUT: { value: critLUTTex },
+      uTemp0K: { value: temp0K },
+      uLensStrength: { value: lensStrength },
+      uDopplerOn: { value: dopplerEnabled ? 1 : 0 },
+      uBetaCut: { value: betaDopplerCutoff },
+      uBeamC: { value: beamingC },
+      uShowLensHi: { value: 0 },
+      uShowInsideHi: { value: 0 },
+      uRHitbox: { value: R_HITBOX },
+      uRsOverRcam: { value: 0.0 },  // 0 = remote-camera sentinel; see shader
+      uBrightLo: { value: brightLo },
+      uBrightHi: { value: brightHi },
+      uWhiteout: { value: whiteoutKnee },
+      uBrightGamma: { value: brightGamma },
+      uFalseAmt: { value: falseAmt },
+      uFalseDark: { value: falseDark },
+      uFalseColdK: { value: falseColdK },
+      uFalseColor: { value: new THREE.Vector3(...FALSE_COLOR) },
+      uSizeGain: { value: sizeGain }
+    },
+    vertexShader: particleVertexShader,
+    fragmentShader: particleFragmentShader,
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+    blending: THREE.AdditiveBlending
+  });
+  particleSystem = new THREE.Points(particleGeometry, material);
+  particleSystem.frustumCulled = false;
+  scene.add(particleSystem);
+}
+
+// =====================================================================
+// STAR: an extended object (SphereGeometry) on a fixed Keplerian orbit.
+// This is the first thing to use the absolute physical scale (bhMassSolar):
+// orbit and radius are specified in AU / solar radii and converted to the
+// internal length unit (= r_s). 
+// gets its own shader for per-vertex operation, but the shader logic is
+// just copied over from the particle shader.
+// =====================================================================
+
+const RSUN_KM = 696000;
+// 1 internal length unit (= r_s) expressed in physical units, at the current M_BH:
+function kmPerInternal()  { return RS_KM_PER_MSUN * bhMassSolar; }
+function auPerInternal()  { return kmPerInternal() / 1.496e8; }
+
+const star = {
+  aAU: 1.0,          // semi-major axis (AU)
+  e: 0.3,            // eccentricity
+  iDeg: 10,          // inclination (deg) from the disk plane, about the +x (node) line
+  radiusRsun: 1.0,   // stellar radius (R☉)
+  massMsun: 1.0,     // stellar mass (M☉) — nominal; only used for the tidal limit
+  tempK: 5800,       // surface temperature (K)
+  visible: true,
+  mesh: null,
+  meanAnomaly: 0     // advanced by the Keplerian mean motion each frame
+};
+
+// Tidal (Roche-ish) disruption radius in INTERNAL units: r_t ≈ R_*(M_BH/M_*)^{1/3}.
+// The star's periapsis must stay outside SAFETY× this so it can never enter the
+// tidally-unsafe region.
+// This is just for "suspension of disbelief", of course nothing would happen if the star entered a tidally unsafe region, it would just be unrealistic that nothing happens to it.
+const TIDAL_SAFETY = 1.1;
+// When the star sits nearly exactly behind the BH, per-vertex primary-image
+// lensing wraps its mesh into a ring around the shadow and the triangles bridge
+// across it. We hide the star within STAR_HIDE_FACTOR × (its angular radius) of
+// the BH center. Bridging occurs for COM offset ≲ 1.15·θ_star.
+// 2.5 is a safe margin that still shows the legitimate lensed arc at wider offsets; 1.75 is pushing it, but still removes it before things get catastrophic.
+//NOTE: this is not yet addressed for higher-order images, which still do cause havoc.
+//this is on purpose, they are separate meshes that could just be disabled as well.
+// There is also a peculiar glitch with higher-order images when the mesh is exactly *in front* of the shadow, to be investigated.
+const STAR_HIDE_FACTOR = 1.75;
+function tidalRadiusInternal() {
+  const Rint = star.radiusRsun * RSUN_KM / kmPerInternal();
+  return Rint * Math.pow(bhMassSolar / Math.max(star.massMsun, 1e-6), 1/3);
+}
+// Minimum safe periapsis (internal): the larger of the tidal limit and a small
+// margin outside the hitbox, so the star is always both intact and outside the
+// strong-field capture region.
+function minSafePeriapsisInternal() {
+  return Math.max(TIDAL_SAFETY * tidalRadiusInternal(), R_HITBOX * 1.05);
+}
+// Clamp (a,e) so a(1-e) >= min safe periapsis. Returns true if it had to clamp.
+function clampStarOrbitSafe() {
+  const aInt = star.aAU / auPerInternal();
+  const periMinInt = minSafePeriapsisInternal();
+  const periMinAU = periMinInt * auPerInternal();
+  // enforce a(1-e) >= periMinAU. Prefer keeping e; if a is too small, push a up.
+  let clamped = false;
+  if (star.aAU * (1 - star.e) < periMinAU) {
+    // first try reducing e to the max allowed for this a
+    const eMax = 1 - periMinAU / star.aAU;
+    if (eMax >= 0) { star.e = Math.min(star.e, eMax); clamped = true; }
+    else { star.aAU = periMinAU / (1 - star.e); clamped = true; } // a too small even at e=0
+  }
+  return clamped;
+}
+
+// The star is rendered with its own ShaderMaterial that copies the k=0 particle
+// lensing (deflectionAngle + solvePrimaryTheta + thin-lens geometry) but applies
+// it PER VERTEX, so the sphere distorts as it passes behind the BH. Color is
+// computed once from center-of-mass uniforms (position/velocity/temperature),
+// no per-vertex temperature.
+// =====================================================================
+// SHARED GLSL CHUNKS
+// The three vertex shaders (particle / star / starfield) ran three
+// hand-maintained copies of the same lensing maths, which is how the
+// starfield ended up with a solver the particle shader had already had
+// fixed. These are the single definitions, spliced in by template
+// interpolation below. Declaration order matters: obsLapse before the
+// solver, solver before lensK0, critRadius before higherOrderDir.
+// =====================================================================
+const GL_CONST = `
+  const float PI = 3.141592653589793;
+  const float LOG_T_LUT_MAX = 3.4965076; // log(33)
+`;
+// =====================================================================
+// GL_TEMPLUT
+//
+// The old branch linearly interpolated FOPT from 0.35 to 0.0017 in
+// t = (logT - log33)/(log100 - log33). GLSL's mix() does NOT clamp t, so
+// past t = 1 the alpha channel keeps falling, crosses zero at
+// t = 0.35/0.3483 = 1.0049  ->  T = 100.5 kK,
+// and max(...,0.0) pins it at EXACTLY 0 forever after. logLvis then takes
+// log(max(fopt,1e-30)) = -69, i.e.
+//     log10 L_vis:  +5.22 at 100 kK  ->  -21.7 at 120 kK
+// a 27-decade cliff. shade() maps that to lin = 0, disp = 0, and since the
+// final colour is (whiteout mix) * disp, the particle renders pure BLACK.
+// It is still drawn — size does not depend on disp — it is just black.
+// Note the whiteout logic was never the problem: whiteoutTemp already
+// ramps to pure white across 100-400 kK exactly as intended. It was being
+// multiplied by a zero.
+//
+// The physically correct continuation, verified against direct Planck
+// integration over 380-750 nm:
+//   * COLOUR freezes. For T >> hc/(lambda k) ~ 26 kK the visible band sits
+//     in the Rayleigh-Jeans regime, B_lambda -> 2ckT/lambda^4: the spectral
+//     SHAPE there is T-independent, so chromaticity converges to a fixed
+//     blue-white. (The table's own two hottest entries already differ by
+//     only ~4% per channel — that is the convergence showing.)
+//   * FOPT falls as a power law: visible power ∝ T while total ∝ T^4, so
+//     FOPT ∝ T^-3 asymptotically. A least-squares fit over 33-3000 kK gives
+//     exponent 2.917; anchoring at the table top instead (which buys exact
+//     continuity at the seam, worth more than asymptotic purity here) the
+//     best exponent is ~2.85-2.89, max error 0.08-0.10 dex over two decades
+//     of temperature. 2.89 used below.
+//
+// Consequence: log10 L_vis becomes 4*log10(T) - 2.89*log10(T) + const, i.e.
+// L_vis ∝ T^1.11 — hot material gets slowly BRIGHTER, monotonically, and
+// nothing can ever fall off a cliff again:
+//     33 kK -> 4.69,  100 kK -> 5.22,  400 kK -> 5.89,  3000 kK -> 6.86.
+//
+// FOPT_TOP must equal the LUT's top-of-table alpha, FOPT_MATCHED[7] = 0.035.
+// =====================================================================
+const GL_TEMPLUT = `
+  const float FOPT_TOP  = 0.035;   // FOPT at 33 kK == LUT top alpha (keep in sync)
+  const float RJ_EXP    = 2.89;    // Rayleigh-Jeans tail: FOPT ~ T^-2.89
+  const vec3  RJ_RGB    = vec3(0.298, 0.545, 0.973); // frozen RJ chromaticity
+
+  vec4 tempLookup(float tempKK) {
+    float logT = log(max(tempKK, 1e-4));
+    if (logT < 0.0) { float s = smoothstep(-0.5, 0.0, logT); return vec4(0.251,0.0,0.0,1e-8)*s; }
+    if (logT <= LOG_T_LUT_MAX) return texture2D(tempLUT, vec2(logT / LOG_T_LUT_MAX, 0.5));
+    // Above the table: colour frozen at the Rayleigh-Jeans limit, visible-band
+    // fraction decaying as a power law. Continuous with the LUT top in both
+    // channels; unbounded in T, so no clamp and no zero is reachable.
+    return vec4(RJ_RGB, FOPT_TOP * exp(-RJ_EXP * (logT - LOG_T_LUT_MAX)));
+  }
+`;
+
+const GL_FOPT = `
+  float brightFromFopt(float fopt) {
+    return clamp((log(max(fopt,1e-12))*0.4342944819 + 10.36)/10.0, 0.0, 1.0);
+  }
+`;
+const GL_OBS = `
+  // r_s/r_cam for the OBSERVER. Sentinel 0 = camera is remote (r_cam > 15 r_s):
+  // every term below then collapses to an exact 1.0 multiply, so the far-field
+  // path is numerically unchanged and the branch is uniform-coherent.
+  uniform float uRsOverRcam;
+
+  // ---- observer-in-curved-space terms ------------------------------------
+  // Lapse at the camera, sqrt(1 - r_s/r_cam). Everything a static observer
+  // measures locally is referred to infinity through this one factor:
+  //   angle -> impact parameter   b = r_cam sin(theta) / lapse   (exact)
+  //   shadow half-angle           sin(psi) = b_crit*lapse / r_cam (Synge, exact)
+  //   observed frequency          nu_obs = nu / lapse
+  float obsLapse()    { return (uRsOverRcam > 0.0) ? sqrt(1.0 - uRsOverRcam) : 1.0; }
+  float obsInvLapse() { return (uRsOverRcam > 0.0) ? inversesqrt(1.0 - uRsOverRcam) : 1.0; }
+`;
+const GL_DEFL = `
+  float deflectionAngle(float b) {
+    if (b <= uBcrit) return 1e9;
+    return (2.0*uRs/uBcrit) * (-log(1.0 - uBcrit/b)) * uLensStrength;
+  }
+`;
+const GL_SOLVER = `
+  float solvePrimaryTheta(float beta, float rC, float K, float rSrc) {
+    float lap = obsLapse(), inv = obsInvLapse();
+    // thetaInf IS the shadow half-angle: b = b_crit  <=>  sinθ = b_crit·lapse/r_cam.
+    // The Synge correction therefore falls out of the SAME factor as the b map --
+    // it is not a second, independently applied term.
+    float thetaInf = asin(min(1.0, uBcrit*lap/rC));
+    // Initial guess = the EXACT weak-field solution, not a scale estimate.
+    // With alpha = 2 r_s L / b and b = r_C*theta (small angle), the lens equation
+    // theta - K*alpha = beta becomes a quadratic,
+    //     theta^2 - beta*theta - theta_E^2 = 0,   theta_E^2 = 2 r_s L K / r_C,
+    // whose positive root is closed-form. It already satisfies theta >= beta and
+    // theta >= theta_E, so it needs no max() against either. The remaining
+    // Newton steps only have to pick up the log term (the strong-deflection
+    // correction near the ring) rather than find the answer from scratch --
+    // which is why 2 steps from here beat 3 from the old guess:
+    //     r_C=20   old 3 steps 0.48%   ->   new 2 steps 0.00%
+    //     r_C=8    old 3 steps 2.36%   ->   new 2 steps 0.00%
+    float thetaE2 = 2.0*uRs*uLensStrength*K/max(rC, 1e-6);
+    // Floor is thetaInf*1.05, NOT thetaInf: at theta == thetaInf exactly,
+    // b == b_crit, where alpha diverges and dalpha/db -> -infinity, so gp blows
+    // up and Newton's step collapses to zero -- the solver freezes on the ring.
+    // That bites infalling material specifically, because K = 1 - r_cam/distL is
+    // tiny there, so the quadratic root lands below thetaInf and gets floored
+    // onto the singular point. The 5% standoff keeps the derivative finite; it
+    // costs nothing elsewhere (worst-case error identical to 2 decimals at every
+    // r_cam from 8 to 140).
+    float theta = max(0.5*(beta + sqrt(beta*beta + 4.0*thetaE2)), thetaInf*1.05);
+    for (int it = 0; it < 2; it++) {   // 2 suffices from the closed-form start
+      float b = rC*sin(theta)*inv;
+      if (b <= uBcrit*1.0001) { theta = asin(min(1.0, uBcrit*1.0001*lap/rC)); b = rC*sin(theta)*inv; }
+      float a = deflectionAngle(b);
+      // Degenerate: no b > b_crit exists at this camera radius, so the primary
+      // image is undefined (camera inside the critical impact parameter). The
+      // 1e9 sentinel would otherwise blow theta up to ~1e9, where float32 ULP is
+      // 64 -- identical for every source, so every one of them ends up drawn in
+      // the SAME direction. Leave theta at thetaInf instead.
+      if (a > 1.0e8) break;
+      float g = theta - K*a - beta;
+      float dadb = -(2.0*uRs*uLensStrength)/(b*(b - uBcrit));
+      float gp = 1.0 - K*dadb*rC*cos(theta)*inv;   // db/dθ carries the same 1/lapse
+      // gp -> 0 when theta crosses pi/2: cos flips sign there and the strong-
+      // deflection term cancels the leading 1.0, so Newton's step is unbounded.
+      // theta then runs away (5.55 rad measured at r_C=2). Because the image is
+      // built as cos(th)*dBH + sin(th)*t, any theta outside [0,pi] WRAPS -- a
+      // runaway theta re-enters at an arbitrary angle, including at the shadow
+      // centre, which is the "particles smeared across the shadow" artifact.
+      // Bites only where the shadow is large (r_cam < ~3.5); above that the
+      // limiter never engages and convergence is bit-identical.
+      if (abs(gp) < 0.25) gp = (gp >= 0.0) ? 0.25 : -0.25;
+      theta -= clamp(g/gp, -0.4, 0.4);
+      // Upper clamp keeps b = rC*sin(theta) >= b_crit on BOTH sides of pi/2 and
+      // makes it impossible for any image to land inside the shadow.
+      theta = clamp(theta, thetaInf*1.0001, max(thetaInf*1.0001, PI - thetaInf*1.0001));
+    }
+
+    // ---- physical ceiling for material inside the photon sphere -------------
+    // The effective potential V(r) = (1 - r_s/r)/r^2 peaks at r = 1.5 r_s with
+    // V_max = 1/b_crit^2. An OUTGOING photon launched from inside that radius
+    // escapes only if 1/b^2 > V_max, i.e. b < b_crit. So a source inside the
+    // photon sphere images strictly INSIDE the shadow -- it can never appear
+    // outside the photon ring.
+    //
+    // The strong-deflection formula cannot know this: it assumes the ray has a
+    // periapsis outside the photon sphere and comes back out, and left alone it
+    // asymptotes to b = 1.085*b_crit as r_src -> r_s, i.e. ~9% on the WRONG side
+    // of the ring. Infalling particles then hang outside the ring and redshift
+    // out before reaching it.
+    //
+    // Sources far behind the hole need a large azimuthal sweep, which drives
+    // b -> b_crit from below, so the correct limit is "just inside the ring".
+    // Ramp onto it across [1.5 r_s, 2.5 r_s]: the spawn radius is untouched and
+    // only material that has actually begun to plunge is affected.
+    float wOut = smoothstep(1.5*uRs, 2.5*uRs, rSrc);
+    theta = mix(min(theta, thetaInf*0.999), theta, wOut);
+    return theta;
+  }
+`;
+const GL_LENSK0 = `
+  vec3 lensK0(vec3 S, vec3 camPos) {
+    float rC = length(camPos);
+    vec3 L = S - camPos; float distL = max(length(L), 1e-6);
+    vec3 dS = L / distL;
+    vec3 dBH = -camPos / rC;
+    float tClosest = dot(dS, -camPos);
+    float dotv = clamp(dot(dS, dBH), -1.0, 1.0);
+    float beta = acos(dotv);
+    if (tClosest > 0.0 && tClosest < distL) {
+      vec3 t = dS - dotv*dBH; float tl = length(t);
+      if (tl < 1e-6) { vec3 ref=(abs(dBH.x)<0.9)?vec3(1,0,0):vec3(0,1,0); t=cross(ref,dBH); tl=length(t); }
+      t /= max(tl,1e-9);
+      float K = clamp(1.0 - rC/distL, 0.0, 1.0);
+      float th = solvePrimaryTheta(beta, rC, K, length(S));
+      // taper the deflection smoothly to zero as beta -> pi/2 (where the thin-lens
+      // approximation degrades and the tClosest gate takes over) so there is no
+      // discontinuity at the old hard cone edge.
+      float w = 1.0 - smoothstep(1.0, 1.55, beta);
+      th = beta + w * (th - beta);
+      vec3 dImg = cos(th)*dBH + sin(th)*t;
+      // Kerr frame-dragging (Born), skipped at a=0. Δv_LT = −(4Ma/b²)[(Ŝ·b̂)ĵ+(Ŝ·ĵ)b̂],
+      // b̂ = BH→closest approach, ĵ = d̂×b̂; image shifts by δθ = −K·Δv_LT. The leading
+      // minus is the backward-ray-tracing correction (matches particle shader).
+      if (uBhSpin > 0.0) {
+        float stt = sin(th), ctt = cos(th);
+        float bImp = rC * stt;
+        if (bImp > 1e-3) {
+          float GMs = 0.5*uRs;
+          float aLen = uBhSpin * GMs;
+          vec3 bHat = ctt*t - stt*dBH;
+          vec3 jHat = cross(dImg, bHat);
+          vec3 spinAx = vec3(0.0, 1.0, 0.0);
+          float sb = dot(spinAx, bHat);
+          float sj = dot(spinAx, jHat);
+          float coef = -4.0*GMs*aLen/(bImp*bImp);
+          vec3 dv = -coef*(sb*jHat + sj*bHat);
+          dImg = normalize(dImg - K*dv);
+        }
+      }
+      return camPos + dImg*distL;
+    }
+    return S;
+  }
+`;
+const GL_CRIT = `
+  float critRadius(float phi) {
+    return texture2D(uCritLUT, vec2(phi / (2.0*PI), 0.5)).r;
+  }
+`;
+
+// =====================================================================
+// GL_HOD — finite-distance higher-order image solver 
+//
+// A photon sweeping azimuth Δφ around the BH from a source at radius r_src
+// to the camera at r_C decomposes as
+//
+//     Δφ = π + α(b) − ξ_src(b) − ξ_cam(b),
+//
+// where ξ = asin(b·lapse/r) is the Synge angle between the ray and the
+// radial direction at each endpoint (the straight-leg cutoffs) and α(b) is
+// the asymptotic deflection. The sweep demanded by image order k is
+//
+//     odd  k (opposite side):  Δφ = (k+1)π − ψ
+//     even k (same side):      Δφ = kπ + ψ
+//
+// so every order solves ONE implicit equation,
+//
+//     α(b) = A_k + ξ_src(b) + ξ_cam(b),      A_k = alphaForOrder(k, ψ).
+//
+// The old code dropped the ξ terms and inverted α(b) = A_k with the Bozza
+// strong-deflection form b = rcrit·(1 + exp(b̄ − A)). That is valid only for
+// A ≫ 1; at k = 1 with the source BEHIND the hole, A = π − ψ → 0 and the
+// image — the weak-field SECONDARY, i.e. the underside of the far disk —
+// was pinned near the ring instead of sliding out toward the Einstein
+// radius. Keeping the ξ terms makes the same equation valid in every
+// regime: for A large they are a small correction and b hugs the critical
+// curve exactly as before; for A → 0 they reproduce the finite-distance
+// secondary (agrees with the opposite-side thin-lens solution to <1% near
+// alignment). k = 0 (solvePrimaryTheta) is untouched, and no thin-lens
+// lever arm K appears here — which also means near-side sources (where
+// K = 1 − r_C/distL ≤ 0 would have killed a thin-lens route) fall out of
+// the same equation with A ≈ π, hugging the ring as before.
+//
+// α(b) is the SAME log interpolant as GL_DEFL, coefficient 2·r_s/rcrit
+// (rcrit in place of b_crit so the Kerr critical curve carries through),
+// making orders 0 and ≥1 mutually consistent where their domains meet.
+// uLensStrength is deliberately NOT applied: it is documented as the
+// order-0 multiplier, and scaling a winding deflection is not meaningful.
+// Change C below to include it if you decide otherwise.
+//
+// Solved by Newton in α on  F(α) = α − A − ξ_src(b(α)) − ξ_cam(b(α)),
+// using the analytic inverse b(α) = rcrit/(1 − exp(−α/C)). Since
+// db/dα < 0 and dξ/db > 0, F' = 1 + (positive) ≥ 1 everywhere: F is
+// strictly monotone, the root is unique, and Newton steps are bounded by
+// the residual — no stationary points, no runaway, no per-branch clamps.
+// 4 unrolled iterations reach float precision across k = 1..3,
+// ψ ∈ [2°, 179°], r_src ∈ [3, 40], r_C ∈ [4, 10⁶] and rcrit ± 15% (Kerr
+// span), verified against a 200-step bisection reference. uBbar survives
+// only as the seed of the initial guess.
+//
+// Known soft spot: sources at r_src ≲ 2 r_s near perfect alignment hit the
+// tangential-emission ceiling b ≤ r_src/lapse_src (a photon leaving radius
+// r cannot carry more impact parameter than tangential emission gives it);
+// the final clamp handles it. This is the same plunge corner the k = 0
+// solver already ramps separately.
+// =====================================================================
+const GL_HOD = `
+  float higherOrderDir(vec3 S, float kf, vec3 camPos, float rC, out vec3 dir) {
+    dir = vec3(0.0);
+    float sLen = length(S);
+    if (sLen < 0.000001 || rC < 0.000001) return -1.0;
+    float dotSC = clamp(dot(S, camPos) / (sLen * rC), -1.0, 1.0);
+    float psi = acos(dotSC);
+    float odd = mod(kf, 2.0);
+    float A = (odd > 0.5) ? (kf*PI - psi) : ((kf - 1.0)*PI + psi);
+
+    vec3 dBH = -camPos / rC;
+    vec3 L = S - camPos;
+    float Llen = max(length(L), 0.000001);
+    vec3 dS = L / Llen;
+    float proj = dot(dS, dBH);
+    vec3 t = dS - proj*dBH;
+    float tLen = length(t);
+    if (tLen < 0.000001) {
+      vec3 ref = (abs(dBH.x) < 0.9) ? vec3(1.0,0.0,0.0) : vec3(0.0,1.0,0.0);
+      t = cross(ref, dBH); tLen = length(t);
+    }
+    t /= tLen;
+    float side = (odd > 0.5) ? -1.0 : 1.0;
+    vec3 tHat = side * t;                     // image-plane direction of this image
+
+    // ring radius: Kerr critical curve at this azimuth (b_crit if a=0)
+    float rcrit = uBcrit;
+    if (uBhSpin > 0.0) {
+      vec3 spinAx = vec3(0.0, 1.0, 0.0);
+      vec3 Sproj = spinAx - dot(spinAx, dBH)*dBH;
+      float Sl = length(Sproj);
+      if (Sl < 1e-5) {                        // pole-on: azimuth degenerate, curve ~circular
+        vec3 ref = (abs(dBH.x) < 0.9) ? vec3(1.0,0.0,0.0) : vec3(0.0,1.0,0.0);
+        Sproj = normalize(cross(ref, dBH));
+      } else Sproj /= Sl;
+      vec3 hAxis = cross(dBH, Sproj);         // +α axis (retrograde side)
+      float phi = atan(dot(tHat, Sproj), dot(tHat, hAxis)); // from +α toward +β
+      rcrit = critRadius(phi);
+    }
+
+    // ---- finite-distance order equation, Newton in alpha --------------------
+    float C = 2.0*uRs/rcrit;                  // log coefficient of GL_DEFL's law
+    float lapC = obsLapse();
+    float lapS = sqrt(max(0.0, 1.0 - uRs/sLen));
+    // initial guess: the old Bozza b, plus the xi terms it implies
+    float bG = rcrit*(1.0 + exp(uBbar - A));
+    float al = max(A + asin(min(bG*lapS/sLen, 0.9999))
+                     + asin(min(bG*lapC/rC,  0.9999)), 0.02);
+    float b = bG;
+    for (int i = 0; i < 4; i++) {
+      b = rcrit / max(1.0 - exp(-al/C), 1e-6);
+      float sS = min(b*lapS/sLen, 0.9999);
+      float sC = min(b*lapC/rC,  0.9999);
+      float F  = al - A - asin(sS) - asin(sC);
+      float mdb = b*(b - rcrit)/(rcrit*C);    // -db/dalpha  (positive)
+      float Fp = 1.0 + mdb*( lapS/(sLen*sqrt(1.0 - sS*sS))
+                           + lapC/(rC  *sqrt(1.0 - sC*sC)) );
+      al = max(al - F/Fp, 0.02);
+    }
+    b = rcrit / max(1.0 - exp(-al/C), 1e-6);
+    // tangential-emission ceiling (see header): only plunging material near
+    // perfect alignment ever reaches it.
+    b = min(b, 0.9999*sLen/max(lapS, 1e-3));
+
+    float ratio = b * lapC / rC;              // exact b -> local viewing angle
+    if (ratio >= 1.0) return -1.0;
+    float theta = asin(ratio);
+    dir = cos(theta)*dBH + sin(theta)*tHat;
+    return theta;
+  }
+`;
+
+const starVertexShader = `
+  uniform vec3  uCamPos;
+  uniform vec3  uStarPos;    // center-of-mass world position
+  uniform vec3  uStarVel;    // center-of-mass velocity (celerity q)
+  uniform float uStarTemp;   // intrinsic surface temperature (K)
+  uniform float uBcrit;
+  uniform float uBbar;
+  uniform float uRs;
+  uniform float uLensStrength;
+  uniform float uDopplerOn;
+  uniform float uBetaCut;
+  uniform float uBeamC;
+  uniform float uStarLensOn;
+  uniform float uHoBright;    // higher-order brightness falloff (shared with particles)
+  uniform float uBhSpin;      // Kerr spin a* ∈ [0,1]; 0 = Schwarzschild (skips frame-dragging)
+  uniform sampler2D uCritLUT; // Kerr critical curve r_crit(φ) LUT (shared with particles)
+  uniform sampler2D tempLUT;
+  attribute float aImageOrder; // per-mesh constant: image order (0 = direct, 1..k = relativistic)
+  varying vec3 vColor;
+
+${GL_CONST}
+
+${GL_TEMPLUT}
+${GL_FOPT}
+${GL_OBS}
+
+${GL_DEFL}
+${GL_SOLVER}
+  // per-vertex k=0 thin-lens: map a world source point to its lensed apparent position
+${GL_LENSK0}
+  // Kerr critical-curve radius at image-plane azimuth φ (shared LUT; RepeatWrapping seam).
+${GL_CRIT}
+  // per-vertex higher-order (relativistic) image direction — mirrors particleVertexShader
+  // so the strong-deflection math lives in one form. The images pile onto the Kerr
+  // critical curve: r_crit(φ) replaces b_crit (they coincide when a=0). Writes the
+  // camera-to-image unit direction into dir; returns theta_k (or -1 if degenerate).
+${GL_HOD}
+  // COM-based observed color for a given image order. Even orders (0,2,4..) see the
+  // approaching-side Doppler; odd orders (1,3..) see it inverted. Order 0 additionally
+  // gets δ^C beaming; higher orders get the per-order brightness falloff instead.
+  vec3 starColor(float order) {
+    float r = length(uStarPos);
+    float q2 = dot(uStarVel, uStarVel);
+    float gammaP = sqrt(1.0 + q2);
+    float betaMag = sqrt(q2) / gammaP;
+    float g = sqrt(max(0.0, 1.0 - uRs/r) * max(0.0, 1.0 - q2/(1.0+q2)));
+    // g is the EMITTER-side factor; obsInvLapse() is the observer-side piece,
+    // so nu_obs/nu_emit = lapse(r_src)/lapse(r_cam). Matches effectiveTemps() in
+    // the particle shader.
+    float tBase = uStarTemp * g * obsInvLapse();
+    float betaLOS = 0.0, dopA = 0.0;
+    if (uDopplerOn > 0.5 && betaMag >= uBetaCut) {
+      vec3 nHat = normalize(uCamPos - uStarPos);
+      betaLOS = dot(uStarVel, nHat) / gammaP; dopA = 1.0;
+    }
+    bool even = (mod(order, 2.0) < 0.5);
+    float tEff = even ? (tBase / max(1.0 - betaLOS, 0.05))
+                      : (tBase / max(1.0 + betaLOS, 0.05));
+    vec4 lut = tempLookup(tEff * 0.001);
+    vec3 col = lut.rgb * brightFromFopt(lut.a);
+    if (order < 0.5) {
+      if (dopA > 0.5) { float dLong = 1.0/max(1.0-betaLOS,0.05); col *= pow(dLong/gammaP, uBeamC); }
+    } else {
+      col *= max(0.0, 1.0 - order*(1.0 - uHoBright));   // dim higher orders (no beaming)
+    }
+    return col;
+  }
+
+  void main() {
+    float order = aImageOrder;
+    vec3 world = (modelMatrix * vec4(position, 1.0)).xyz;   // vertex world position
+    float rC = length(uCamPos);
+    vec3 lensed;
+    if (order < 0.5) {
+      // direct image (k=0): primary thin-lens (or undistorted when lensing off)
+      lensed = (uStarLensOn > 0.5) ? lensK0(world, uCamPos) : world;
+    } else {
+      // relativistic image (k>=1): per-vertex strong-deflection direction
+      vec3 dir;
+      float th = higherOrderDir(world, order, uCamPos, rC, dir);
+      if (th < 0.0) {
+        lensed = world;                        // degenerate (never happens for rC>>b_crit)
+      } else {
+        float dist = length(world - uCamPos);  // keep each vertex's own depth
+        lensed = uCamPos + dir * dist;
+      }
+    }
+    gl_Position = projectionMatrix * viewMatrix * vec4(lensed, 1.0);
+    vColor = starColor(order);
+  }
+`;
+const starFragmentShader = `
+  varying vec3 vColor;
+  void main() { gl_FragColor = vec4(vColor, 1.0); }
+`;
+
+let starLensOn = true;       // GPU per-vertex lensing on/off (for comparison)
+const STAR_MAX_ORDER = 4;    // draw direct image (k=0) plus relativistic images k=1..4
+let starMaterial = null;
+function makeStarMaterial() {
+  return new THREE.ShaderMaterial({
+    uniforms: {
+      tempLUT: { value: tempLUT },
+      uCamPos: { value: new THREE.Vector3() },
+      uStarPos: { value: new THREE.Vector3() },
+      uStarVel: { value: new THREE.Vector3() },
+      uStarTemp: { value: star.tempK },
+      uBcrit: { value: B_CRIT },
+      uBbar: { value: B_BAR },
+      uRs: { value: RS },
+      uLensStrength: { value: lensStrength },
+      uDopplerOn: { value: dopplerEnabled ? 1 : 0 },
+      uBetaCut: { value: betaDopplerCutoff },
+      uBeamC: { value: beamingC },
+      uStarLensOn: { value: 1 },
+      uHoBright: { value: hoBrightness }, // shared with particles, could be tuned separately
+      uBhSpin: { value: bhSpin },
+      uCritLUT: { value: critLUTTex },
+      uRsOverRcam: { value: 0.0 }   // 0 = remote-camera sentinel; see GL_OBS
+    },
+    vertexShader: starVertexShader,
+    fragmentShader: starFragmentShader,
+    side: THREE.DoubleSide  // lensing can flip winding; avoid holes when distorted
+  });
+}
+
+// Build the star as a stack of meshes (one per image order) all sharing the same
+// material (the lensing math lives in a single shader). Each mesh carries a
+// constant per-geometry `aImageOrder` attribute selecting its order; k=0 is full
+// resolution (it's the solid star), higher orders are low-poly (they collapse
+// toward thin arcs on the ring). star.meshes[k] is order k; star.mesh aliases k=0.
+function buildStar() {
+  if (!starMaterial) starMaterial = makeStarMaterial();
+  const Rint = star.radiusRsun * RSUN_KM / kmPerInternal();
+  if (star.meshes) for (const m of star.meshes) { scene.remove(m); m.geometry.dispose(); }
+  star.meshes = [];
+  for (let k = 0; k <= STAR_MAX_ORDER; k++) {
+    const seg = (k === 0) ? 12 : 6;
+    const geo = new THREE.SphereGeometry(Rint, seg, seg);
+    const nv = geo.attributes.position.count;
+    const orderAttr = new Float32Array(nv);
+    orderAttr.fill(k);
+    geo.setAttribute('aImageOrder', new THREE.BufferAttribute(orderAttr, 1));
+    const mesh = new THREE.Mesh(geo, starMaterial);
+    mesh.frustumCulled = false;
+    mesh.userData.order = k;
+    scene.add(mesh);
+    star.meshes.push(mesh);
+  }
+  star.mesh = star.meshes[0];
+}
+
+// Solve Kepler's equation M = E - e·sinE (Newton), return eccentric anomaly E.
+function solveKepler(M, e) {
+  M = ((M % (2*Math.PI)) + 2*Math.PI) % (2*Math.PI);
+  let E = e < 0.8 ? M : Math.PI;
+  //todo: let it exit early if the diff becomes small enough
+  for (let k = 0; k < 8; k++) E = E - (E - e*Math.sin(E) - M) / (1 - e*Math.cos(E));
+  return E;
+}
+
+// Advance and position the star from its mean anomaly, compute its orbital
+// velocity (celerity), and push COM state to the material uniforms. dtInternal
+// is the coordinate-time step this frame (same clock as the particle integrator).
+const _starPos = new THREE.Vector3();
+function updateStar(dtInternal) {
+  if (!star.meshes) return;
+  if (!star.visible) { for (const m of star.meshes) m.visible = false; return; }
+
+  const aInt = star.aAU / auPerInternal();
+  const n = Math.sqrt(GM / (aInt*aInt*aInt));  // mean motion (Newtonian, GM=0.5)
+  star.meanAnomaly += n * dtInternal;
+
+  // keep the star inside the camera far plane even when its orbit (which scales
+  // as 1/M_BH in internal units) is large. Only touches the projection when the
+  // required far actually changes (i.e. on mass / a / e changes), not every frame.
+  const needFar = Math.max(2000, aInt * (1 + star.e) + controls.maxDistance + 100);
+  if (Math.abs(camera.far - needFar) > 1) { camera.far = needFar; camera.updateProjectionMatrix(); }
+
+  const E = solveKepler(star.meanAnomaly, star.e);
+  const cE = Math.cos(E), sE = Math.sin(E);
+  const ir = star.iDeg * Math.PI/180, si = Math.sin(ir), ci = Math.cos(ir);
+  const sqe = Math.sqrt(1 - star.e*star.e);
+
+  // perifocal position (P toward periapsis = +x; Q in-plane perpendicular).
+  // Q is negated so the star orbits the SAME sense as the accretion disk.
+  const P = aInt * (cE - star.e);
+  const Q = -aInt * sqe * sE;
+  _starPos.set(P, Q*si, Q*ci);
+  for (const m of star.meshes) m.position.copy(_starPos); // all orders share the COM
+
+  // orbital velocity (celerity q = γv), analytic from the Kepler state
+  const dEdt = n / (1 - star.e*cE);
+  const vP = -aInt * sE * dEdt;
+  const vQ = -aInt * sqe * cE * dEdt;  // negated to match Q
+  const vx = vP, vy = vQ*si, vz = vQ*ci;
+  const v2 = Math.min(vx*vx + vy*vy + vz*vz, 0.998);
+  const gam = 1 / Math.sqrt(1 - v2);
+
+  const u = starMaterial.uniforms;
+  u.uCamPos.value.copy(camera.position);
+  u.uStarPos.value.copy(_starPos);
+  u.uStarVel.value.set(vx*gam, vy*gam, vz*gam);
+  u.uStarTemp.value = star.tempK;
+  u.uLensStrength.value = lensStrength;
+  u.uDopplerOn.value = dopplerEnabled ? 1 : 0;
+  u.uBetaCut.value = betaDopplerCutoff;
+  u.uBeamC.value = beamingC;
+  u.uStarLensOn.value = starLensOn ? 1 : 0;
+  u.uHoBright.value = hoBrightness;
+  u.uBhSpin.value = bhSpin;   // uCritLUT is the shared texture rebuilt by the particle pass
+  u.uRsOverRcam.value = obsRsOverRcam;   // shared observer gate, computed in animate()
+
+  // artifact guard for the direct image (k=0): hide it when it is (nearly) exactly
+  // behind the BH and lensing is on — the per-vertex primary would otherwise wrap
+  // into a ring and paint across the shadow. Only when behind the BH (a star in
+  // front correctly occludes the shadow). 
+  //todo: shadow-fill guard  for higher order images (could be attached here, or could become something more sophisticated giving them actual slice-shapes)
+  let wrapHide = false;
+  if (starLensOn) {
+    const cp = camera.position, rC = cp.length();
+    const tsx = _starPos.x - cp.x, tsy = _starPos.y - cp.y, tsz = _starPos.z - cp.z;
+    const distStar = Math.hypot(tsx, tsy, tsz) || 1e-6;
+    const cosB = (tsx*(-cp.x) + tsy*(-cp.y) + tsz*(-cp.z)) / (distStar * rC);
+    const betaStar = Math.acos(Math.min(1, Math.max(-1, cosB)));
+    const thetaStar = (star.radiusRsun * RSUN_KM / kmPerInternal()) / distStar;
+    const behind = (distStar * cosB > rC);
+    wrapHide = behind && (betaStar < STAR_HIDE_FACTOR * thetaStar);
+  }
+  star.meshes[0].visible = !wrapHide;
+  for (let k = 1; k < star.meshes.length; k++) star.meshes[k].visible = starLensOn;
+}
+
+//The main course: all lensing math now lives in particleVertexShader (excepting per-frame precalculation of uCritLUT)
+const particleVertexShader = `
+  attribute float aInstanceOrder; // INSTANCED: 0 (direct) / 1 / 2 (higher orders)
+  attribute vec3 aVel;            // physical velocity (celerity q) — for Doppler
+  varying vec3 vColor;
+  uniform float uAttenScale;
+  uniform vec3  uCamPos;
+  uniform float uBcrit;
+  uniform float uBbar;
+  uniform float uRs;
+  uniform float uHoBright;
+  uniform float uPBaseSize;
+  uniform float uHoPixelSize;
+  uniform float uHoRefDist;
+  uniform float uBhSpin;       // Kerr spin a* ∈ [0,1]; 0 = Schwarzschild (skips frame-dragging)
+  uniform sampler2D uCritLUT;  // Kerr critical curve r_crit(φ) LUT (1×N, .r = radius); flat b_crit at a=0
+  uniform float uTemp0K;       // temperature scale (K at r = r_s)
+  uniform float uLensStrength; // order-0 deflection multiplier
+  uniform float uDopplerOn;
+  uniform float uBetaCut;
+  uniform float uBeamC;        // δ^C beaming exponent
+  uniform float uShowLensHi;   // debug: paint lensed order-0 gold
+  uniform float uShowInsideHi; // debug: paint inside-hitbox order-0 violet
+  uniform float uRHitbox;
+  uniform float uBrightLo;     // log10 L_vis mapped to black
+  uniform float uBrightHi;     // log10 L_vis mapped to full scale
+  uniform float uWhiteout;     // display level at which colour starts washing to white
+  uniform float uBrightGamma;  // <1 flattens brightness differences, >1 steepens
+  uniform float uFalseAmt;     // cold-particle false-colour strength
+  uniform float uFalseDark;    // finished r+g+b below which a particle counts as "dark"
+  uniform float uFalseColdK;   // local REST temperature below which it counts as "cold"
+  uniform vec3  uFalseColor;   // the baseline false colour
+  uniform float uSizeGain;     // 0 = fixed sprite size, >0 = size grows with brightness
+  uniform sampler2D tempLUT;
+
+${GL_CONST}
+  const vec3  COL_LENSED = vec3(1.0, 0.812, 0.420);
+  const vec3  COL_INSIDE = vec3(0.616, 0.486, 1.0);
+
+${GL_TEMPLUT}
+  // ---- physical brightness -> rgb ----------------------------------------
+  // The relativistic side ends at an EFFECTIVE TEMPERATURE. Everything below is
+  // ordinary Planck bookkeeping and pure display policy.
+  //
+  // Visible-band luminosity of a blackbody patch, log10, up to an additive
+  // constant:   log10(σT⁴ · FOPT(T)) = 4·log10(T) + log10(FOPT(T)).
+  // The LUT's .a channel IS FOPT(T), so this costs one log over what we had.
+  //
+  // Because T_obs already carries the FULL shift δ (SR Doppler, transverse,
+  // emitter lapse, observer lapse), the T⁴ term reproduces the bolometric δ⁴
+  // boost exactly -- identical to the star pipeline's explicit
+  // D⁴·FOPT(TD)/FOPT(T), since (TD)⁴FOPT(TD) / T⁴FOPT(T) == D⁴·FOPT(TD)/FOPT(T).
+  // Applying a separate beaming factor on top would therefore DOUBLE COUNT.
+  float logLvis(float tempKK, float fopt) {
+    return (4.0*log(max(tempKK, 1e-4)) + log(max(fopt, 1e-30))) * 0.4342944819;
+  }
+  // Display policy: map a window of log luminosity onto [0,1], then wash to
+  // white at the top. Nothing here is physics -- it is the choice of which
+  // physical range gets the available sub-white rgb. No false-colour logic
+  // lives here any more; that is a single final-stage test at the bottom of
+  // main(), applied to the finished colour.
+  vec3 shade(vec4 lut, float tempKK, float lv, out float disp) {
+    float lin = clamp((lv - uBrightLo) / max(uBrightHi - uBrightLo, 0.001), 0.0, 1.0);
+    // Contrast curve. gamma < 1 lifts faint detail and flattens the differences
+    // between bright and dim material; gamma > 1 steepens them.
+    disp = (uBrightGamma == 1.0) ? lin : pow(lin, uBrightGamma);
+    float whiteoutBright = smoothstep(uWhiteout, 1.0, disp);
+    float whiteoutTemp   = smoothstep(100.0, 400.0, tempKK); // beyond LUT extrapolation
+    return mix(lut.rgb, vec3(1.0), max(whiteoutTemp, whiteoutBright)) * disp;
+  }
+
+${GL_OBS}
+
+  // deflection α(b): weak-limit 2 r_s/b, log divergence at b_crit
+${GL_DEFL}
+  // thin-lens primary image θ, 3 unrolled Newton steps (matches JS solvePrimaryTheta)
+${GL_SOLVER}
+
+  // Kerr critical-curve radius at image-plane azimuth φ (RepeatWrapping handles seam).
+${GL_CRIT}
+
+  // strong-deflection image direction for higher order k. The ring the images
+  // pile onto is the Kerr critical curve: we look up r_crit(φ) at the image's
+  // azimuth and use it in place of b_crit (they coincide when a=0).
+${GL_HOD}
+
+  // effective observed temps (even/odd) from physical state — mirrors JS.
+  // Also returns gamma, betaLOS and a dopActive flag so callers can apply beaming.
+  void effectiveTemps(vec3 S, vec3 vel, float r, vec3 camPos,
+                      out float tEven, out float tOdd,
+                      out float gammaP, out float betaLOS, out float dopActive) {
+    float q2 = dot(vel, vel);
+    gammaP = sqrt(1.0 + q2);
+    float betaMag = sqrt(q2) / gammaP;
+    float g = sqrt(max(0.0, 1.0 - uRs/r) * max(0.0, 1.0 - q2/(1.0+q2)));
+    // g is the EMITTER-side factor (grav + transverse). obsInvLapse() is the
+    // observer-side piece that was missing: ν_obs/ν_emit = lapse(r_src)/lapse(r_cam).
+    float tBase = uTemp0K * pow(max(r, 0.001), -0.75) * g * obsInvLapse();
+    betaLOS = 0.0; dopActive = 0.0;
+    if (uDopplerOn > 0.5 && betaMag >= uBetaCut) {
+      vec3 nHat = normalize(camPos - S);
+      betaLOS = dot(vel, nHat) / gammaP;
+      dopActive = 1.0;
+    }
+    tEven = tBase / max(1.0 - betaLOS, 0.05);
+    tOdd  = tBase / max(1.0 + betaLOS, 0.05);
+  }
+
+  void main() {
+    float order = aInstanceOrder;
+    float rC = length(uCamPos);
+    vec3 S = position;              // physical position (== pos array)
+    float r = length(S);
+    vec3 wpos; vec3 col; float sz; float atten;
+
+    // NOTE: the observer-side gravitational intensity boost that used to live
+    // here (gBeam = obsInvLapse()^C) has been REMOVED. It is now carried
+    // exactly by T_obs⁴ inside logLvis(), since obsInvLapse() is already
+    // folded into the effective temperature. Keeping it would double count.
+
+    if (order < 0.5) {
+      // ================= ORDER 0 (direct image) =================
+      // --- thin-lens position ---
+        vec3 outPos = S; bool lensed = false; 
+        vec3 L = S - uCamPos; float distL = max(length(L), 1e-6);
+        vec3 dS = L / distL;
+        vec3 dBH = -uCamPos / rC;
+        float tClosest = dot(dS, -uCamPos);
+        float dotv = clamp(dot(dS, dBH), -1.0, 1.0);
+        float beta = acos(dotv);
+        if (tClosest > 0.0 && tClosest < distL) {
+          vec3 t = dS - dotv*dBH; float tl = length(t);
+          // t is a difference of near-equal unit vectors; below ~1e-6 its
+          // DIRECTION is rounding noise, so the divide is floored.
+          t /= max(tl, 1e-9);
+          float K = clamp(1.0 - rC/distL, 0.0, 1.0);
+          float th = solvePrimaryTheta(beta, rC, K, r);
+          float w = 1.0 - smoothstep(1.0, 1.55, beta);  // fade deflection to 0 by beta~pi/2
+          th = beta + w * (th - beta);
+          vec3 dImg = cos(th)*dBH + sin(th)*t;
+          // Kerr frame-dragging (Born), skipped at a=0. Δv_LT = −(4Ma/b²)[(Ŝ·b̂)ĵ+(Ŝ·ĵ)b̂],
+          // b̂ = BH→closest approach, ĵ = d̂×b̂; image shifts by δθ = −K·Δv_LT. Mirrors JS.
+          if (uBhSpin > 0.0) {
+            float stt = sin(th), ctt = cos(th);
+            float bImp = rC * stt;
+            if (bImp > 1e-3) {
+              float GMs = 0.5*uRs;               // GM = r_s/2
+              float aLen = uBhSpin * GMs;
+              vec3 bHat = ctt*t - stt*dBH;        // BH → closest approach (unit)
+              vec3 jHat = cross(dImg, bHat);      // d̂ × b̂
+              vec3 spinAx = vec3(0.0, 1.0, 0.0);  // diskNormal
+              float sb = dot(spinAx, bHat);
+              float sj = dot(spinAx, jHat);
+              float coef = -4.0*GMs*aLen/(bImp*bImp);   // sign: backward ray-tracing flips frame-dragging
+              vec3 dv = -coef*(sb*jHat + sj*bHat);
+              dImg = normalize(dImg - K*dv);      // δθ = −K·Δv_LT
+            }
+          }
+          outPos = uCamPos + dImg*distL; lensed = true;
+        }
+        wpos = outPos;
+        // --- color from even effective temp, with δ^C beaming ---
+        float tEven, tOdd, gammaP, betaLOS, dopActive;
+        effectiveTemps(S, aVel, r, uCamPos, tEven, tOdd, gammaP, betaLOS, dopActive);
+        float tKK = tEven * 0.001;
+        vec4 lut = tempLookup(tKK);
+        float lv = logLvis(tKK, lut.a);
+        // δ⁴ is already inside lv via T_obs⁴. uBeamC is the TOTAL exponent the
+        // user wants applied, so only the EXCESS over physical is added here:
+        // C = 4 is exact, C < 4 under-beams, C > 4 exaggerates. No double count.
+        if (dopActive > 0.5) {
+          float dSR = max((1.0 / max(1.0 - betaLOS, 0.05)) / gammaP, 1e-6);
+          lv += (uBeamC - 4.0) * log(dSR) * 0.4342944819;
+        }
+        float disp0;
+        col = shade(lut, tKK, lv, disp0);
+        // debug highlight overrides
+        if (uShowLensHi > 0.5 && lensed) col = COL_LENSED;
+        else if (uShowInsideHi > 0.5 && r < uRHitbox) col = COL_INSIDE;
+      sz = uPBaseSize * (1.0 + uSizeGain * disp0); atten = 1.0;
+    } else {
+      // ================= HIGHER ORDERS =================
+      vec3 dir;
+      float th = higherOrderDir(S, order, uCamPos, rC, dir);
+      // Per-order dimming, ADDITIVE IN LOG10 as the design note intends: order k
+      // is offset by k*log10(uHoBright), i.e. scaled by uHoBright^k. The previous
+      // form max(0, 1 - k*(1-h)) is only the first-order expansion of that, and it
+      // goes NEGATIVE once h < 1 - 1/k -- at k=2 that is h < 0.5, where the clamp
+      // tripped the bailout below and the second-order image was DISCARDED rather
+      // than dimmed. h^k cannot reach zero for h > 0, so k=2 now fades smoothly.
+      // Applied to log luminosity, not to the display value, so a dimmed image
+      // slides down the same transfer curve as any other brightness change.
+      float hoLogDim = order * log(max(uHoBright, 1e-8)) * 0.4342944819;
+      if (th < 0.0 || uHoBright <= 0.0) {
+        wpos = uCamPos; col = vec3(0.0); sz = 0.0; atten = 0.0;
+      } else {
+        float dist = length(S - uCamPos);
+        wpos = uCamPos + dir * dist;
+        float tEven, tOdd, gp, bl, act;
+        effectiveTemps(S, aVel, r, uCamPos, tEven, tOdd, gp, bl, act);
+        float tempK = (mod(order,2.0) < 0.5) ? tEven : tOdd;
+        float tKK = tempK * 0.001;
+        vec4 lut = tempLookup(tKK);
+        float lv = logLvis(tKK, lut.a);
+        if (act > 0.5) {
+          float sSign = (mod(order,2.0) < 0.5) ? 1.0 : -1.0;
+          float dSR = max((1.0 / max(1.0 - sSign*bl, 0.05)) / gp, 1e-6);
+          lv += (uBeamC - 4.0) * log(dSR) * 0.4342944819;
+        }
+        lv += hoLogDim;
+        float dispK;
+        col = shade(lut, tKK, lv, dispK);
+        // shrink HO images with camera distance: all HO images sit on the photon
+        // ring (screen radius ∝ 1/r_C), so a fixed px size packs ever more of them
+        // onto the shrinking ring and whites out. Scale ∝ 1/r_C beyond the ref dist.
+        sz = uHoPixelSize * (1.0 + uSizeGain * dispK) * min(1.0, uHoRefDist / rC); atten = 0.0;
+      }
+    }
+
+    // ---- false colour for cold, dark material -------------------------------
+    // Deliberately the LAST thing before the colour leaves the vertex shader, so
+    // it is independent of every Planck and display parameter above: it only
+    // inspects the finished product.
+    //   dark: finished r+g+b below uFalseDark
+    //   cold: LOCAL REST temperature below uFalseColdK
+    //
+    // The temperature test uses the rest temperature uTemp0K*r^-0.75, NOT the
+    // observed tBase. tBase already carries the gravitational redshift factor g,
+    // so material inspiralling near the horizon has a LOW tBase while being
+    // intrinsically hot -- testing on tBase would false-colour exactly the
+    // particles we want to exclude. Rest temperature rises monotonically inward,
+    // so this test excludes them on its own and no radius gate is needed.
+    // (At uTemp0K = 1e4 K the 3000 K threshold sits at r = 4.98 r_s.)
+    //
+    // smoothstep rather than a hard cut: a step would band visibly where
+    // neighbouring particles straddle the threshold. Collapse the ranges to zero
+    // width to recover the plain test.
+    if (uFalseAmt > 0.0) {
+      float tRest = uTemp0K * pow(max(r, 0.001), -0.75);
+      float dark = 1.0 - smoothstep(uFalseDark*0.75, uFalseDark*1.25, col.r + col.g + col.b);
+      float cold = 1.0 - smoothstep(uFalseColdK*0.9, uFalseColdK*1.1, tRest);
+      // per-order dimming, so a cold particle's k=1/k=2 images are not lifted to
+      // the same level as its direct image
+      col += uFalseColor * (dark * cold * uFalseAmt * pow(max(uHoBright, 0.0), order));
+    }
+
+    vColor = col;
+    vec4 mv = modelViewMatrix * vec4(wpos, 1.0);
+    gl_Position = projectionMatrix * mv;
+    float attenuated = sz * uAttenScale / max(-mv.z, 0.001);
+    gl_PointSize = mix(sz, attenuated, atten);
+  }
+`;
+
+// =====================================================================
+// REMOTE STARFIELD: thousands of point sources on the celestial sphere,
+// lensed by the SAME Kerr-capable functions as the disk (copied verbatim
+// below) so their images shear, shift and pile onto the photon ring exactly
+// like disk material. They live at infinity, so we hand the lensing an
+// effective source  S = camera + R_SKY·ŝ : the camera offset sits INSIDE S,
+// so the ray direction is exactly ŝ (no parallax) while the lens lever arm
+// K = 1 − r_C/R_SKY → 1 (the correct infinity limit). We keep only the lensed
+// direction and stamp it on the far plane (skybox depth), so there is no real
+// distance and nothing to clip. Colour from T (shared tempLUT); size and
+// intensity from apparent magnitude.
+// =====================================================================
+// Mass at/above which the BH is "supermassive" enough that the starfield is its
+// OWN galaxy rather than an unrelated backdrop: the galactic plane locks to the
+// disk, and the band tightens from "no extra bias" here to a thin bright lane
+// at GAL_MAX_MASS.
+const GAL_ALIGN_MASS  = 1e5;
+const GAL_MAX_MASS    = 1e10;
+const GAL_SIGMA_WIDE  = 0.35;   // rad, ~20°  — band width at GAL_ALIGN_MASS
+const GAL_SIGMA_TIGHT = 0.05;   // rad, ~2.9° — band width at GAL_MAX_MASS
+const GAL_MAG_EXP     = 1.0;    // >1 pushes more of the magnitude range toward "bright, unbiased"
+
+function generateStarfield(N = 10000, massSolar = null) {
+  const HALF_PI = Math.PI / 2;
+  const gauss = () => {
+    const u = Math.random() || 1e-12;
+    return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * Math.random());
+  };
+  const randomQuaternion = () => {
+    const a = gauss(), b = gauss(), c = gauss(), d = gauss();
+    const n = Math.sqrt(a*a + b*b + c*c + d*d);
+    return [a/n, b/n, c/n, d/n];
+  };
+  const quaternionToPoint = ([w, x, y, z]) => [
+    2 * (x*z + w*y),
+    2 * (y*z - w*x),
+    1 - 2 * (x*x + y*y),
+  ];
+  const pointToRaDec = (v) => {
+    let ra = Math.atan2(v[1], v[0]);
+    if (ra < 0) ra += 2 * Math.PI;
+    const dec = Math.asin(Math.max(-1, Math.min(1, v[2])));
+    return [ra, dec];
+  };
+
+  // Inverse standard normal CDF (Acklam), max relative error ~1.15e-9.
+  // The declination warp wants sigma*sqrt(2)*erfinv(z); since z is uniform on
+  // [-1,1] that is identically sigma*probit((z+1)/2), and probit is the easier
+  // primitive to write accurately.
+  const probit = (p) => {
+    p = Math.min(1 - 1e-12, Math.max(1e-12, p));
+    const a = [-3.969683028665376e+01, 2.209460984245205e+02, -2.759285104469687e+02,
+                1.383577518672690e+02, -3.066479806614716e+01, 2.506628277459239e+00];
+    const b = [-5.447609879822406e+01, 1.615858368580409e+02, -1.556989798598866e+02,
+                6.680131188771972e+01, -1.328068155288572e+01];
+    const c = [-7.784894002430293e-03, -3.223964580411365e-01, -2.400758277161838e+00,
+               -2.549732539343734e+00, 4.374664141464968e+00, 2.938163982698783e+00];
+    const d = [7.784695709041462e-03, 3.224671290700398e-01, 2.445134137142996e+00,
+               3.754408661907416e+00];
+    const pl = 0.02425, ph = 1 - pl;
+    let q, r;
+    if (p < pl) {
+      q = Math.sqrt(-2 * Math.log(p));
+      return (((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) /
+             ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1);
+    }
+    if (p > ph) {
+      q = Math.sqrt(-2 * Math.log(1 - p));
+      return -(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5]) /
+              ((((d[0]*q+d[1])*q+d[2])*q+d[3])*q+1);
+    }
+    q = p - 0.5; r = q*q;
+    return (((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5])*q /
+           (((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1);
+  };
+
+  const mMin = -1.5, mMax = 6.5, ln3 = Math.log(3);
+  const pMin = Math.pow(3, mMin), pMax = Math.pow(3, mMax);
+  const sampleMagnitude = () =>
+    Math.log(pMin + Math.random() * (pMax - pMin)) / ln3;
+  const sampleTemperature = () =>
+    Math.random() < 0.6
+      ? 2000  + Math.random() * 8000
+      : 10000 + Math.random() * 20000;
+
+  // ---- band strength from BH mass -----------------------------------------
+  // t = 0 below GAL_ALIGN_MASS and at it (no bias at all), 1 at GAL_MAX_MASS.
+  const t = (massSolar !== null && massSolar >= GAL_ALIGN_MASS)
+    ? Math.min(1, Math.max(0, Math.log10(massSolar / GAL_ALIGN_MASS) /
+                              Math.log10(GAL_MAX_MASS / GAL_ALIGN_MASS)))
+    : 0;
+  const bandSigma = GAL_SIGMA_WIDE * Math.pow(GAL_SIGMA_TIGHT / GAL_SIGMA_WIDE, t);
+
+  // Dim stars are assumed remote, so they trace the galactic disk; bright stars
+  // are assumed nearby and stay roughly isotropic. 0 at the brightest magnitude,
+  // 1 at the faintest.
+  const biasWeight = (mag) =>
+    Math.pow(Math.min(1, Math.max(0, (mag - mMin) / (mMax - mMin))), GAL_MAG_EXP);
+
+  // ---- galactic frame ------------------------------------------------------
+  // generateStarfield's internal +z becomes world +y in buildStarfield
+  // (dirs[i*3+1] = sin(dec)), and +y is the spin axis / disk normal. So the
+  // galactic plane coincides with the BH disk exactly when the pole is internal
+  // +z -- the identity frame. Only the unaligned (low-mass) case needs a
+  // rotation, and there the pole is uniformly random on the sphere.
+  const cross = (a, b) => [a[1]*b[2] - a[2]*b[1], a[2]*b[0] - a[0]*b[2], a[0]*b[1] - a[1]*b[0]];
+  const norm = (v) => { const n = Math.sqrt(v[0]*v[0]+v[1]*v[1]+v[2]*v[2]) || 1;
+                        return [v[0]/n, v[1]/n, v[2]/n]; };
+  const pole = (t > 0) ? [0, 0, 1] : quaternionToPoint(randomQuaternion());
+  const ref  = (Math.abs(pole[0]) < 0.9) ? [1, 0, 0] : [0, 1, 0];
+  const e1   = norm(cross(ref, pole));
+  const e2   = cross(pole, e1);
+  const toWorld = (v) => [
+    v[0]*e1[0] + v[1]*e2[0] + v[2]*pole[0],
+    v[0]*e1[1] + v[1]*e2[1] + v[2]*pole[1],
+    v[0]*e1[2] + v[1]*e2[2] + v[2]*pole[2],
+  ];
+
+  // ---- position: uniform sample, then warp the declination -----------------
+  // No rejection. z is uniform on [-1,1] for a uniform sphere point, so
+  // sigma*probit((z+1)/2) is EXACTLY Gaussian(0, sigma) in declination. Blending
+  // against the unwarped asin(z) keeps bright stars isotropic: a = 0 reproduces
+  // the uniform sphere exactly, a = 1 is the pure Gaussian band. Both branches
+  // are monotonic in z, so the blend is monotonic and cannot fold.
+  const biasedPoint = (mag) => {
+    const v = quaternionToPoint(randomQuaternion());
+    const z = Math.max(-1, Math.min(1, v[2]));
+    let dec = Math.asin(z);
+    const a = t * biasWeight(mag);
+    if (a > 0) {
+      const g = Math.max(-HALF_PI, Math.min(HALF_PI, bandSigma * probit(0.5 * (z + 1))));
+      dec = (1 - a) * dec + a * g;
+    }
+    const az = Math.atan2(v[1], v[0]);     // azimuth is untouched
+    const cd = Math.cos(dec);
+    return [cd * Math.cos(az), cd * Math.sin(az), Math.sin(dec)];
+  };
+
+  const perturbPoint = (v, sigma) => {
+    const x = v[0] + gauss() * sigma;
+    const y = v[1] + gauss() * sigma;
+    const z = v[2] + gauss() * sigma;
+    const n = Math.sqrt(x*x + y*y + z*z);
+    return [x/n, y/n, z/n];
+  };
+  const clusterTempThreshold = 15000;
+  const clusterProb          = 0.08;
+  const clusterAngularSigma  = 0.012;
+  // Clusters still favour the plane. Evaluated on the GALACTIC-frame latitude
+  // with a fixed width, so an unbiased sky keeps exactly the old behaviour.
+  const clusterBandSigma = 0.30;
+  const clusterBoost = (vGal) => {
+    const b = Math.asin(Math.max(-1, Math.min(1, vGal[2])));
+    return 0.3 + 0.7 * Math.exp(-(b*b) / (2 * clusterBandSigma * clusterBandSigma));
+  };
+
+  const stars = [];
+  while (stars.length < N) {
+    // magnitude first: the positional bias depends on it
+    const mag = sampleMagnitude();
+    const T   = sampleTemperature();
+    const vGal = biasedPoint(mag);
+    const [ra, dec] = pointToRaDec(toWorld(vGal));
+    stars.push([ra, dec, mag, T]);
+    if (T > clusterTempThreshold &&
+        Math.random() < clusterProb * clusterBoost(vGal) &&
+        stars.length < N) {
+      const nCompanions = 2 + Math.floor(Math.random() * 4);
+      for (let i = 0; i < nCompanions && stars.length < N; i++) {
+        // companions perturb the parent's ALREADY-WARPED position, so a cluster
+        // stays a cluster instead of being scattered by its members' magnitudes
+        const vp = perturbPoint(vGal, clusterAngularSigma);
+        const [ra2, dec2] = pointToRaDec(toWorld(vp));
+        const T2   = 10000 + Math.random() * 20000;
+        const mag2 = Math.max(mMin, Math.min(mMax, mag + gauss() * 1.2));
+        stars.push([ra2, dec2, mag2, T2]);
+      }
+    }
+  }
+  return stars.slice(0, N);
+}
+
+let nStars = 8000;               // current star count (UI slider); regen on increase, truncate on decrease
+let starGeneratedCount = 0;      // how many stars actually live in the buffers
+const MAX_STAR_ORDER = 2;        // match the disk's higher-order images (0,1,2)
+const STAR_MAG_REF = 4.0;        // apparent magnitude mapped to unit flux
+let starPixel = 1.5;             // base sprite size (px) at unit flux (UI slider)
+let starBrightness = 2.5;        // global intensity multiplier (UI slider)
+let starfieldEnabled = true;
+let starfield = null;
+
+// Lensing helpers below are copied verbatim from the star-mesh shader so the
+// starfield's images are identical to the disk's. main() differs: it forms the
+// far source S, keeps only the lensed direction, and renders on the far plane.
+const starfieldVertexShader = `
+  uniform vec3  uCamPos;
+  uniform float uBcrit;
+  uniform float uBbar;
+  uniform float uRs;
+  uniform float uLensStrength;
+  uniform float uHoBright;
+  uniform float uBhSpin;
+  uniform sampler2D uCritLUT;
+  uniform sampler2D tempLUT;
+  uniform float uStarPixel;
+  uniform float uStarBright;
+  uniform float uMagRef;
+  uniform float uHoRefDist;
+
+  attribute vec3  aStarDir;      // unit direction to the star (celestial sphere)
+  attribute float aStarMag;      // apparent magnitude
+  attribute float aStarTemp;     // temperature (K)
+  attribute float aInstanceOrder;// image order (0 = direct, 1.. = relativistic)
+
+  varying vec3 vColor;
+
+${GL_CONST}
+  const float R_SKY = 1.0e5;     // effective source distance → K≈1, ŝ-exact ray, no parallax
+
+${GL_TEMPLUT}
+${GL_FOPT}
+${GL_OBS}
+
+${GL_DEFL}
+${GL_SOLVER}
+${GL_LENSK0}
+${GL_CRIT}
+${GL_HOD}
+
+  void main() {
+    float order = aInstanceOrder;
+    float rC = length(uCamPos);
+    vec3 S = uCamPos + R_SKY * aStarDir;   // effective far source along ŝ
+    vec3 lensedDir; bool visible = true;
+    if (order < 0.5) {
+      vec3 pos = lensK0(S, uCamPos);
+      lensedDir = normalize(pos - uCamPos);
+    } else {
+      vec3 dir;
+      float th = higherOrderDir(S, order, uCamPos, rC, dir);
+      if (th < 0.0) { visible = false; lensedDir = aStarDir; } else lensedDir = dir;
+    }
+    // stamp on the far plane in the lensed direction (skybox depth trick):
+    // a point one unit away in dir projects to the right screen spot; z=w puts
+    // it at the far plane (LessEqualDepth lets it pass; opaque geometry occludes).
+    vec4 clip = projectionMatrix * viewMatrix * vec4(uCamPos + lensedDir, 1.0);
+    gl_Position = clip.xyww;
+
+    // stars sit at infinity, so the only frequency shift is the observer's own
+    // gravitational blueshift
+    vec4 lut = tempLookup(aStarTemp * 0.001 * obsInvLapse());
+    float flux = pow(10.0, -0.4 * (aStarMag - uMagRef));      // relative flux
+    float orderScale = (order < 0.5) ? 1.0 : max(0.0, 1.0 - order*(1.0 - uHoBright));
+    vColor = lut.rgb * uStarBright * sqrt(flux) * orderScale; // √-compressed intensity
+    if (!visible) vColor = vec3(0.0);
+
+    float sizeBoost = 1.0 + 0.6 * log2(1.0 + flux);           // brighter → a little larger
+    // order 0 = a star at infinity: constant angular (pixel) size, no distance scaling.
+    // higher orders sit on the photon ring, so they shrink ∝ 1/r_C like the disk's.
+    float hoScale = (order < 0.5) ? 1.0 : 0.75 * min(1.0, uHoRefDist / rC);
+    gl_PointSize = uStarPixel * sizeBoost * hoScale;
+    if (!visible) gl_PointSize = 0.0;
+  }
+`;
+const starfieldFragmentShader = `
+  varying vec3 vColor;
+  void main() {
+    vec2 d = gl_PointCoord - vec2(0.5);
+    float r2 = dot(d, d) * 4.0;                  // ~1 at the sprite edge
+    float a = exp(-r2*8.0) + 0.5*exp(-r2*3.0);   // bright core + wide soft skirt
+    gl_FragColor = vec4(vColor * a, 1.0);
+  }
+`;
+
+function buildStarfield(count) {
+  count = count || nStars;
+  const raw = generateStarfield(count, bhMassSolar);
+  const n = raw.length;
+  starGeneratedCount = n;
+  const dirs  = new Float32Array(n*3);
+  const mags  = new Float32Array(n);
+  const temps = new Float32Array(n);
+  for (let i = 0; i < n; i++) {
+    const s = raw[i], ra = s[0], dec = s[1], cd = Math.cos(dec);
+    dirs[i*3]   = cd*Math.cos(ra);
+    dirs[i*3+1] = Math.sin(dec);          // dec → spin axis (y); galactic band tilts across sky
+    dirs[i*3+2] = cd*Math.sin(ra);
+    mags[i]  = s[2];
+    temps[i] = s[3];
+  }
+  const geo = new THREE.InstancedBufferGeometry();
+  geo.setAttribute('position',  new THREE.BufferAttribute(dirs, 3));   // vertex count only (shader ignores it)
+  geo.setAttribute('aStarDir',  new THREE.BufferAttribute(dirs, 3));
+  geo.setAttribute('aStarMag',  new THREE.BufferAttribute(mags, 1));
+  geo.setAttribute('aStarTemp', new THREE.BufferAttribute(temps, 1));
+  const orders = new Float32Array(MAX_STAR_ORDER + 1);
+  for (let k = 0; k <= MAX_STAR_ORDER; k++) orders[k] = k;
+  geo.setAttribute('aInstanceOrder', new THREE.InstancedBufferAttribute(orders, 1));
+  geo.instanceCount = MAX_STAR_ORDER + 1;
+  geo.setDrawRange(0, Math.min(nStars, n));   // truncation happens here
+
+  const mat = new THREE.ShaderMaterial({
+    uniforms: {
+      tempLUT: { value: tempLUT },
+      uCritLUT: { value: critLUTTex },
+      uCamPos: { value: new THREE.Vector3() },
+      uBcrit: { value: B_CRIT },
+      uBbar: { value: B_BAR },
+      uRs: { value: RS },
+      uLensStrength: { value: lensStrength },
+      uHoBright: { value: hoBrightness },
+      uBhSpin: { value: bhSpin },
+      uStarPixel: { value: starPixel },
+      uStarBright: { value: starBrightness },
+      uMagRef: { value: STAR_MAG_REF },
+      uHoRefDist: { value: HO_REF_DIST },
+      uRsOverRcam: { value: 0.0 }   // 0 = remote-camera sentinel; see GL_OBS
+    },
+    vertexShader: starfieldVertexShader,
+    fragmentShader: starfieldFragmentShader,
+    transparent: true,
+    depthWrite: false,
+    depthTest: true,
+    blending: THREE.AdditiveBlending
+  });
+  starfield = new THREE.Points(geo, mat);
+  starfield.frustumCulled = false;
+  starfield.renderOrder = -1;   // draw as the backdrop
+  scene.add(starfield);
+}
+
+// Star-count slider: moving DOWN just truncates the draw range (throw out the
+// upper end of the existing sky); moving UP past what we've generated regenerates
+// a fresh, larger field from scratch.
+function setStarCount(newN) {
+  nStars = newN;
+  if (!starfield) return;
+  if (newN > starGeneratedCount) {
+    scene.remove(starfield);
+    starfield.geometry.dispose();
+    starfield.material.dispose();
+    buildStarfield(newN);
+  } else {
+    starfield.geometry.setDrawRange(0, newN);
+  }
+}
+
+function updateStarfield() {
+  if (!starfield) return;
+  starfield.visible = starfieldEnabled;
+  if (!starfieldEnabled) return;
+  const u = starfield.material.uniforms;
+  u.uCamPos.value.copy(camera.position);
+  u.uBhSpin.value = bhSpin;
+  u.uLensStrength.value = lensStrength;
+  u.uHoBright.value = hoBrightness;
+  u.uStarBright.value = starBrightness;
+  u.uStarPixel.value = starPixel;
+  u.uRsOverRcam.value = obsRsOverRcam;   // shared observer gate, computed in animate()
+  // share the disk's higher-order-image toggle
+  starfield.geometry.instanceCount = ringImagesEnabled ? (MAX_STAR_ORDER + 1) : 1;
+}
+
+// =====================================================================
+// PER-FRAME: physics step (JS) -> lensing (JS) -> write buffers -> GPU draw
+// =====================================================================
+
+//const highlightEl = document.getElementById('highlightLensed');
+//const highlightInsideEl = document.getElementById('highlightInside');
+//const showHitboxEl = document.getElementById('showHitbox');
+//const showForbidEl = document.getElementById('showForbid');
+//const obsTermsEl = document.getElementById('obsTerms');
+
+const showHorizonEl = document.getElementById('showHorizon');
+const showShapeAxesEl = document.getElementById('showShapeAxes');
+
+const _appPos = new THREE.Vector3();
+
+function updateParticleBuffers() {
+  const frame = getCameraFrame(camera, H);
+  const camX = frame.camPos.x, camY = frame.camPos.y, camZ = frame.camPos.z;
+  const rC = Math.hypot(camX, camY, camZ);
+  const showLensHi = false; // highlightEl.checked;
+  const showInsideHi = false; // highlightInsideEl.checked;
+
+  // per-frame uniforms
+  const u = particleSystem.material.uniforms;
+  u.uCamPos.value.set(camX, camY, camZ);
+  u.uHoBright.value = hoBrightness;
+  u.uBhSpin.value = bhSpin;
+  // rebuild the Kerr critical-curve LUT for the current spin and viewing
+  // inclination θo (angle of the camera from the spin axis y). Cheap dirty-check
+  // inside skips the work when neither changed.
+  {
+    const rCcam = Math.hypot(camX, camY, camZ) || 1;
+    updateCritLUT(bhSpin, Math.acos(Math.min(1, Math.max(-1, camY / rCcam))));
+
+    // Observer-in-curved-space gate: computed once per frame in animate() from
+    // the post-veto camera position, shared with the integrator clock.
+    u.uRsOverRcam.value = obsRsOverRcam;
+  }
+  u.uTemp0K.value = temp0K;
+  u.uLensStrength.value = lensStrength;
+  u.uDopplerOn.value = dopplerEnabled ? 1 : 0;
+  u.uBetaCut.value = betaDopplerCutoff;
+  u.uBeamC.value = beamingC;
+  u.uShowLensHi.value = showLensHi ? 1 : 0;
+  u.uShowInsideHi.value = showInsideHi ? 1 : 0;
+  u.uBrightLo.value = brightLo;
+  u.uBrightHi.value = brightHi;
+  u.uWhiteout.value = whiteoutKnee;
+  u.uBrightGamma.value = brightGamma;
+  u.uFalseAmt.value = falseAmt;
+  u.uFalseDark.value = falseDark;
+  u.uFalseColdK.value = falseColdK;
+  u.uSizeGain.value = sizeGain;
+  particleGeometry.instanceCount = ringImagesEnabled ? (MAX_IMAGE_ORDER + 1) : 1;
+
+  // position (=pos) and aVel (=q) are written by the physics step each frame
+  particleGeometry.attributes.position.needsUpdate = true;
+  particleGeometry.attributes.aVel.needsUpdate = true;
+}
+
+// =====================================================================
+// Unit formatting helpers (display only — never fed back into physics)
+// =====================================================================
+
+function formatLength(km) {
+  const AU_KM = 1.496e8, LS_KM = 299792.458;
+  if (km < 1) return (km*1000).toFixed(1) + ' m';
+  if (km < 1e6) return km.toFixed(km < 10 ? 2 : 0) + ' km';
+  if (km < AU_KM * 0.05) return (km / LS_KM).toFixed(2) + ' light-s';
+  if (km < AU_KM * 1e4) return (km / AU_KM).toFixed(3) + ' AU';
+  return (km / AU_KM).toExponential(2) + ' AU';
+}
+function formatTime(sec) {
+  if (sec < 1e-6) return (sec*1e9).toFixed(1) + ' ns';
+  if (sec < 1e-3) return (sec*1e6).toFixed(1) + ' µs';
+  if (sec < 1) return (sec*1e3).toFixed(2) + ' ms';
+  if (sec < 60) return sec.toFixed(2) + ' s';
+  if (sec < 3600) return (sec/60).toFixed(2) + ' min';
+  if (sec < 86400) return (sec/3600).toFixed(2) + ' hr';
+  if (sec < 3.156e7) return (sec/86400).toFixed(2) + ' days';
+  return (sec/3.156e7).toExponential(2) + ' yr';
+}
+function formatCompact(x, unit) {
+  if (x === 0) return '0' + unit;
+  if (Math.abs(x) < 1000 && Math.abs(x) >= 0.01) return x.toPrecision(3) + unit;
+  return x.toExponential(2) + unit;
+}
+
+// order-of-magnitude reference only: anchored at T_max~1e7 K for a 10 Msun
+// BH at Eddington accretion, scaled as T_max ~ M^(-1/4) (standard disk-theory
+// scaling). Not used anywhere in the sim, purely a "how much are we cheating"
+// comparison against the user-chosen temp0K slider.
+function eddingtonPeakTempK(massSolar) {
+  return 1e7 * Math.pow(massSolar / 10, -0.25);
+}
+
+// =====================================================================
+// UI wiring
+// =====================================================================
+
+const nEl = document.getElementById('nParticles');
+const kEl = document.getElementById('kDisk');
+const sEl = document.getElementById('simSpeedLog');
+const mEl = document.getElementById('bhMassLog');
+const starVisibleEl = document.getElementById('starVisible');
+const starAEl = document.getElementById('starA');
+const starEEl = document.getElementById('starE');
+const starIEl = document.getElementById('starI');
+const starREl = document.getElementById('starR');
+const starTEl = document.getElementById('starT');
+const velNoiseEl = document.getElementById('velNoiseEl');
+const posNoiseEl = document.getElementById('posNoiseEl');
+const temp0El = document.getElementById('temp0Log');
+const dragEl = document.getElementById('dragEl');
+const hoEl = document.getElementById('hoEl');
+const ringImagesEl = document.getElementById('ringImagesEnabled');
+const starfieldEl = document.getElementById('starfieldEnabled');
+const starBrightEl = document.getElementById('starBrightEl');
+const nStarsEl = document.getElementById('nStarsEl');
+const starPixelEl = document.getElementById('starPixelEl');
+const dopplerEl = document.getElementById('dopplerEnabled');
+const beamCEl = document.getElementById('beamCEl');
+const betaCutEl = document.getElementById('betaCutEl');
+
+document.getElementById('outN').textContent = N;
+document.getElementById('outK').textContent = kDisk.toFixed(3);
+document.getElementById('outSpeed').textContent = formatCompact(simSpeed, '×');
+document.getElementById('outBhMass').textContent = formatCompact(bhMassSolar, ' M☉');
+document.getElementById('outVelNoise').textContent = velNoise.toFixed(2);
+document.getElementById('outPosNoise').textContent = posNoise.toFixed(2);
+document.getElementById('outTemp0').textContent = formatCompact(temp0K, ' K');
+document.getElementById('outDrag').textContent = dragStrength.toFixed(4);
+document.getElementById('outHO').textContent = hoBrightness.toFixed(2);
+document.getElementById('outBeamC').textContent = beamingC.toFixed(1);
+document.getElementById('outBetaCut').textContent = betaDopplerCutoff.toFixed(2);
+
+function resetAll() {
+  initPhysics();
+  buildParticleSystem();
+  clampStarOrbitSafe();
+  buildStar();
+  star.meanAnomaly = 0;
+  accretedMassKg = 0;
+  absorbedCount = 0;
+  safetyRecycleCount = 0;
+  horizonBreachCount = 0;
+  internalTimeElapsed = 0;
+}
+
+nEl.addEventListener('input', () => {
+  N = parseInt(nEl.value, 10);
+  document.getElementById('outN').textContent = N;
+  resetAll();
+});
+kEl.addEventListener('input', () => {
+  kDisk = parseFloat(kEl.value);
+  document.getElementById('outK').textContent = kDisk.toFixed(3);
+});
+sEl.addEventListener('input', () => {
+  simSpeed = Math.pow(10, parseFloat(sEl.value)); // log slider
+  document.getElementById('outSpeed').textContent = formatCompact(simSpeed, '×');
+});
+mEl.addEventListener('input', () => {
+  bhMassSolar = Math.pow(10, parseFloat(mEl.value)); // log slider: 0.3..10 -> ~2..1e10 solar masses
+  tEdd = eddingtonPeakTempK(bhMassSolar);
+  document.getElementById('outBhMass').textContent = formatCompact(bhMassSolar, ' M☉');
+  temp0K = tEdd*Math.pow(10, parseFloat(temp0El.value)); // log slider
+  document.getElementById('outTemp0').textContent = formatCompact(temp0K, ' K');
+  // the internal size of the star's orbit/radius scales with M_BH — re-clamp & rebuild
+  clampStarOrbitSafe();
+  refreshStarUI();
+  buildStar();
+});
+document.getElementById('bhSpinEl').addEventListener('input', (e) => {
+  bhSpin = parseFloat(e.target.value);
+  buildDiskProfile();
+  document.getElementById('outBhSpin').textContent = bhSpin.toFixed(2) + (bhSpin > 0 ? ' (Kerr)' : ' (Schwarzschild)');
+});
+document.getElementById('sphericalSpawnEl').addEventListener('change', (e) => {
+  sphericalSpawn = e.target.checked;
+  resetAll();
+});
+
+// Reflect the star's (possibly safety-clamped) parameters back into the sliders/labels.
+function refreshStarUI() {
+  starAEl.value = star.aAU; document.getElementById('outStarA').textContent = star.aAU.toFixed(2) + ' AU';
+  starEEl.value = star.e;   document.getElementById('outStarE').textContent = star.e.toFixed(2);
+  starIEl.value = star.iDeg; document.getElementById('outStarI').textContent = Math.round(star.iDeg) + '°';
+  starREl.value = star.radiusRsun; document.getElementById('outStarR').textContent = star.radiusRsun.toFixed(1) + ' R☉';
+  starTEl.value = (star.tempK/1000); document.getElementById('outStarT').textContent = (star.tempK/1000).toFixed(1) + ' kK';
+}
+starVisibleEl.addEventListener('change', () => { star.visible = starVisibleEl.checked; });
+starAEl.addEventListener('input', () => {
+  star.aAU = parseFloat(starAEl.value); clampStarOrbitSafe(); refreshStarUI();
+});
+starEEl.addEventListener('input', () => {
+  star.e = parseFloat(starEEl.value); clampStarOrbitSafe(); refreshStarUI();
+});
+starIEl.addEventListener('input', () => {
+  star.iDeg = parseFloat(starIEl.value); document.getElementById('outStarI').textContent = Math.round(star.iDeg) + '°';
+});
+starREl.addEventListener('input', () => {
+  star.radiusRsun = parseFloat(starREl.value);
+  document.getElementById('outStarR').textContent = star.radiusRsun.toFixed(1) + ' R☉';
+  clampStarOrbitSafe(); refreshStarUI(); buildStar(); // radius affects tidal limit AND mesh size
+});
+starTEl.addEventListener('input', () => {
+  star.tempK = parseFloat(starTEl.value) * 1000;
+  document.getElementById('outStarT').textContent = (star.tempK/1000).toFixed(1) + ' kK';
+  // color is computed live in the shader from uStarTemp (set each frame) — no rebuild
+});
+velNoiseEl.addEventListener('input', () => {
+  velNoise = parseFloat(velNoiseEl.value);
+  document.getElementById('outVelNoise').textContent = velNoise.toFixed(2);
+  resetAll();
+});
+posNoiseEl.addEventListener('input', () => {
+  posNoise = parseFloat(posNoiseEl.value);
+  document.getElementById('outPosNoise').textContent = posNoise.toFixed(2);
+  resetAll();
+});
+temp0El.addEventListener('input', () => {
+  temp0K = tEdd*Math.pow(10, parseFloat(temp0El.value)); // log slider
+  document.getElementById('outTemp0').textContent = formatCompact(temp0K, ' K');
+});
+dragEl.addEventListener('input', () => {
+  dragStrength = parseFloat(dragEl.value);
+  document.getElementById('outDrag').textContent = dragStrength.toFixed(4);
+});
+hoEl.addEventListener('input', () => {
+  hoBrightness = parseFloat(hoEl.value);
+  document.getElementById('outHO').textContent = hoBrightness.toFixed(2);
+});
+ringImagesEl.addEventListener('change', () => {
+  ringImagesEnabled = ringImagesEl.checked;
+});
+starfieldEl.addEventListener('change', () => {
+  starfieldEnabled = starfieldEl.checked;
+});
+starBrightEl.addEventListener('input', () => {
+  starBrightness = parseFloat(starBrightEl.value);
+  document.getElementById('outStarBright').textContent = starBrightness.toFixed(2);
+});
+starPixelEl.addEventListener('input', () => {
+  starPixel = parseFloat(starPixelEl.value);
+  document.getElementById('outStarPixel').textContent = starPixel.toFixed(1);
+});
+nStarsEl.addEventListener('input', () => {
+  const newN = parseInt(nStarsEl.value, 10);
+  document.getElementById('outNStars').textContent = newN;
+  setStarCount(newN);
+});
+dopplerEl.addEventListener('change', () => {
+  dopplerEnabled = dopplerEl.checked;
+});
+beamCEl.addEventListener('input', () => {
+  beamingC = parseFloat(beamCEl.value);
+  document.getElementById('outBeamC').textContent = beamingC.toFixed(1);
+});
+betaCutEl.addEventListener('input', () => {
+  betaDopplerCutoff = parseFloat(betaCutEl.value);
+  document.getElementById('outBetaCut').textContent = betaDopplerCutoff.toFixed(2);
+});
+const brightLoEl = document.getElementById('brightLoEl');
+const brightHiEl = document.getElementById('brightHiEl');
+const whiteoutEl = document.getElementById('whiteoutEl');
+const sizeGainEl = document.getElementById('sizeGainEl');
+brightLoEl.addEventListener('input', () => {
+  brightLo = parseFloat(brightLoEl.value);
+  document.getElementById('outBrightLo').textContent = brightLo.toFixed(1);
+});
+brightHiEl.addEventListener('input', () => {
+  brightHi = parseFloat(brightHiEl.value);
+  document.getElementById('outBrightHi').textContent = brightHi.toFixed(1);
+});
+const gammaEl = document.getElementById('gammaEl');
+const falseAmtEl = document.getElementById('falseAmtEl');
+const falseDarkEl = document.getElementById('falseDarkEl');
+const falseColdEl = document.getElementById('falseColdEl');
+gammaEl.addEventListener('input', () => {
+  brightGamma = parseFloat(gammaEl.value);
+  document.getElementById('outGamma').textContent = brightGamma.toFixed(2);
+});
+falseAmtEl.addEventListener('input', () => {
+  falseAmt = parseFloat(falseAmtEl.value);
+  document.getElementById('outFalseAmt').textContent = falseAmt.toFixed(2);
+});
+falseDarkEl.addEventListener('input', () => {
+  falseDark = parseFloat(falseDarkEl.value);
+  document.getElementById('outFalseDark').textContent = falseDark.toFixed(2);
+});
+falseColdEl.addEventListener('input', () => {
+  falseColdK = parseFloat(falseColdEl.value);
+  document.getElementById('outFalseCold').textContent = falseColdK.toFixed(0);
+});
+whiteoutEl.addEventListener('input', () => {
+  whiteoutKnee = parseFloat(whiteoutEl.value);
+  document.getElementById('outWhiteout').textContent = whiteoutKnee.toFixed(2);
+});
+sizeGainEl.addEventListener('input', () => {
+  sizeGain = parseFloat(sizeGainEl.value);
+  document.getElementById('outSizeGain').textContent = sizeGain.toFixed(2);
+});
+
+document.getElementById('reset').addEventListener('click', resetAll);
+
+// =====================================================================
+// Main loop
+// =====================================================================
+
+resetAll();
+buildStarfield();   // static sky — built once, not rebuilt on reset
+
+let last = performance.now();
+const statsEl = document.getElementById('stats');
+let frameCount = 0, fpsAccum = 0;
+
+// ---- camera exclusion zone -------------------------------------------------
+// Last-known-good rig state, plus scratch vectors (allocated once, not per frame).
+const _prevCamPos  = new THREE.Vector3();
+const _prevTarget  = new THREE.Vector3();
+const _segDelta    = new THREE.Vector3();
+const _segClosest  = new THREE.Vector3();
+let camVetoed = false;
+
+// Does the straight segment a→b pass within radius R of the origin?
+// A point-in-sphere test on b alone is not enough: a single dolly step can be
+// tens of units long and step clean over a 10-unit-diameter ball, so the camera
+// tunnels through the zone while every sampled frame reads as "outside".
+function segmentEntersSphere(a, b, R) {
+  _segDelta.subVectors(b, a);
+  const dd = _segDelta.lengthSq();
+  // Parameter of closest approach to the origin, clamped to the segment.
+  const t = dd > 1e-12
+    ? Math.max(0, Math.min(1, -a.dot(_segDelta) / dd))
+    : 0;
+  _segClosest.copy(a).addScaledVector(_segDelta, t);
+  return _segClosest.lengthSq() < R * R;
+}
+
+
+function animate(now) {
+  const realDt = Math.min(0.05, (now - last) / 1000);
+  last = now;
+
+  // Veto any camera move whose *path* enters the forbidden sphere around the BH.
+  // minDistance only constrains camera-to-target; panning slides the target off
+  // the origin, after which the whole rig can dolly straight through the hole
+  // while every camera-to-target distance stays legal.
+  //
+  // Rolling back camera AND target together (rather than just shoving the camera
+  // outward) keeps OrbitControls' internal target+offset decomposition
+  // consistent, so the correction has nothing to fight.
+  _prevCamPos.copy(camera.position);
+  _prevTarget.copy(controls.target);
+
+  controls.update();
+
+  const prevWasInside = _prevCamPos.lengthSq() < R_FORBID * R_FORBID;
+  if (prevWasInside) {
+    // Illegal starting state (shouldn't happen, but if it ever does — a bad
+    // restore, a hand-edited constant — vetoing would restore the camera to an
+    // inside position every frame and trap it there permanently). Eject
+    // radially to the boundary instead of vetoing.
+    const d = camera.position.length();
+    if (d > 1e-6) camera.position.multiplyScalar(R_FORBID / d);
+    else camera.position.set(R_FORBID, 0, 0);
+    controls.target.set(0, 0, 0);
+    camVetoed = true;
+  } else {
+    camVetoed = segmentEntersSphere(_prevCamPos, camera.position, R_FORBID);
+    if (camVetoed) {
+      camera.position.copy(_prevCamPos);
+      controls.target.copy(_prevTarget);
+    }
+  }
+
+  if (camVetoed) {
+    // Re-run update with damping off. The non-damped branch zeroes sphericalDelta
+    // and panOffset, discarding the residual momentum that would otherwise keep
+    // re-proposing the same rejected move and buzz the camera against the wall.
+    // With the rig restored and all deltas zero, this pass is a no-op on position.
+    const wasDamping = controls.enableDamping;
+    controls.enableDamping = false;
+    controls.update();
+    controls.enableDamping = wasDamping;
+  }
+
+  hitboxGroup.visible = false; // showHitboxEl.checked;
+  forbidGroup.visible = false; // showForbidEl.checked;
+
+  // Observer gate, evaluated AFTER the exclusion veto so it uses the camera
+  // position actually rendered this frame. Feeds both the shader uniform and
+  // the integrator clock, so they can never disagree.
+  {
+    const rC = camera.position.length() || 1;
+    const x = RS / rC;
+    const obsflag = true; // obsTermsEl.checked
+    obsRsOverRcam = (obsflag && x >= 1.0 / 15.0) ? x : 0.0;
+    obsTimeRate = obsRsOverRcam > 0.0 ? 1.0 / Math.sqrt(1.0 - obsRsOverRcam) : 1.0;
+  }
+  horizonGroup.visible = showHorizonEl.checked;
+  if (showHorizonEl.checked) {
+    const aLenW = bhSpin * GM;
+    const rPlusW = GM + Math.sqrt(Math.max(0, GM*GM - aLenW*aLenW));
+    const rEqW = Math.sqrt(rPlusW*rPlusW + aLenW*aLenW);
+    horizonGroup.scale.set(rEqW, rPlusW, rEqW); // equatorial in x,z; polar r₊ in y
+  }
+
+  // per-particle mass, recomputed live from bhMassSolar/N — used only for
+  // the accretion tally below, never for dynamics.
+  currentParticleMassKg = (bhMassSolar * diskMassFraction() / Math.max(1, N)) * MSUN_KG;
+
+  // coarse density map for drag + distribution aggregates (shape tensor,
+  // voxel grid): rebuilt once per frame (not per substep) — coarse heuristics,
+  // one-frame staleness is irrelevant. Built BEFORE the axes viz below so that
+  // reads current-frame shape data.
+  buildDensityMap();
+
+  shapeAxesGroup.visible = showShapeAxesEl.checked;
+  if (shapeAxesGroup.visible) {
+    // orient the polar-map rings to the live disk plane (+y -> measured normal)
+    _diskNormalV3.set(diskNormalLive[0], diskNormalLive[1], diskNormalLive[2]);
+    diskMapGroup.quaternion.setFromUnitVectors(_upV3, _diskNormalV3);
+  }
+  if (showShapeAxesEl.checked) {
+    for (let k = 0; k < 3; k++) {
+      const ax = shapeAxes[k], ext = shapeExtents[k];
+      const pa = shapeAxisLines[k].geometry.attributes.position.array;
+      // double-ended line through the origin, half-length = rms extent
+      pa[0] = -ax[0]*ext; pa[1] = -ax[1]*ext; pa[2] = -ax[2]*ext;
+      pa[3] =  ax[0]*ext; pa[4] =  ax[1]*ext; pa[5] =  ax[2]*ext;
+      shapeAxisLines[k].geometry.attributes.position.needsUpdate = true;
+    }
+  }
+
+  for (let s = 0; s < SUBSTEPS; s++) {
+    //heuristically, simulation becomes completely unstable for speedup >2000 (integration steps too large, all particles ejected from orbit almost immediately)
+    // obsTimeRate = 1/lapse: one unit of camera proper time buys MORE coordinate
+    // time when the camera sits in the well, so the disk evolves faster.
+    const stepDt = DT * simSpeed * obsTimeRate;
+    step(stepDt);
+    internalTimeElapsed += stepDt;
+  }
+
+  updateStar(DT * simSpeed * SUBSTEPS * obsTimeRate); // star orbits on the same coordinate clock
+
+  updateParticleBuffers();
+  updateStarfield();
+  renderer.render(scene, camera);
+
+  frameCount++; fpsAccum += realDt;
+  if (fpsAccum > 0.5) {
+    const fps = Math.round(frameCount / fpsAccum);
+    frameCount = 0; fpsAccum = 0;
+
+    const tauUnitSec = TAU_SEC_PER_MSUN * bhMassSolar;
+    const rsKm = RS_KM_PER_MSUN * bhMassSolar;
+    const stepDtPhysSec = DT * simSpeed * obsTimeRate * tauUnitSec;
+    const tIscoPhysSec = T_ISCO_INTERNAL * tauUnitSec;
+    const stepOverIsco = stepDtPhysSec / tIscoPhysSec;
+    const elapsedPhysSec = internalTimeElapsed * tauUnitSec;
+    const diskMassSolar = bhMassSolar * diskMassFraction();
+
+    const accuracyFlag = stepOverIsco > 0.2 ? '  ⚠ integrator likely unstable near ISCO'
+                        : stepOverIsco > 0.05 ? '  (visible error expected near ISCO)'
+                        : '';
+
+    const accretedFraction = accretedMassKg / (bhMassSolar * MSUN_KG);
+
+
+    // ---- tiny builders for the diagnostics table ----------------------
+    // sec(title)          → section header row
+    // row(label, value)   → label / value row; value cell is the bright one
+    // u(text)             → dim unit or qualifier inside a value cell
+    const _rows = [];
+    const sec = (t) => _rows.push(
+      `<tr class="${_rows.length ? '' : 'first'}"><th class="sec" colspan="2">${t}</th></tr>`);
+    const row = (k, v) => _rows.push(
+      `<tr><td class="k">${k}</td><td class="v">${v}</td></tr>`);
+    const u = (t) => `<span class="u">${t}</span>`;
+
+    sec('render');
+    row('frame rate',      `${fps} ${u('fps')}`);
+    row('particles',       `${N}`);
+    row('b_crit',          `${B_CRIT.toFixed(2)} ${u('r_s')}`);
+
+    sec('camera');
+    row('r_cam',           `${camera.position.length().toFixed(2)} ${u('r_s')}`);
+    row('forbidden below', `${R_FORBID.toFixed(1)} ${u('r_s')}`);
+    if (camVetoed) row('state', `<span class="warn">⛔ VETO</span>`);
+
+    sec('observer');
+    if (obsRsOverRcam <= 0) {
+      row('terms', `<span class="u">off (flat-space camera)</span>`);
+    } else {
+      const lapse    = Math.sqrt(1 - obsRsOverRcam);
+      const rCam     = RS / obsRsOverRcam;
+      const psi      = Math.asin(Math.min(1, B_CRIT * lapse / rCam)) * 180 / Math.PI;
+      const psiFlat  = Math.asin(Math.min(1, B_CRIT / rCam))         * 180 / Math.PI;
+      row('terms',           `<span class="ok">on</span>`);
+      row('r_s / r_cam',     obsRsOverRcam.toFixed(4));
+      row('lapse',           lapse.toFixed(4));
+      row('ν_obs / ν',       (1 / lapse).toFixed(4));
+      row('bolometric',      `×${Math.pow(1 / lapse, 4).toFixed(2)} ${u('(T⁴ in logLvis)')}`);
+      row('shadow ψ',        `${psi.toFixed(2)}°`);
+      row('ψ vs flat cam',   `${psiFlat.toFixed(2)}° ${u(`(${(100 * (psi / psiFlat - 1)).toFixed(1)}%)`)}`);
+      row('dt_coord / dτ_cam', obsTimeRate.toFixed(4));
+      row('disk runs fast by', `${((obsTimeRate - 1) * 100).toFixed(1)}%`);
+    }
+
+    sec('geometry');
+    row('hitbox',          `${R_HITBOX.toFixed(0)} ${u('r_s')}`);
+    row('disk',            `${R_SPAWN_MIN.toFixed(1)}–${R_SPAWN_MAX.toFixed(0)} ${u('r_s')}`);
+    row('inside hitbox',   `${lastInsideCount}`);
+    row('avg dτ/dt there', lastAvgG.toFixed(3));
+
+    sec(`physical scale &nbsp;<span class="u">M_BH = ${formatCompact(bhMassSolar, ' M☉')}</span>`);
+    row('r_s',             formatLength(rsKm));
+    row('hitbox',          formatLength(rsKm * R_HITBOX));
+    row('disk out to',     formatLength(rsKm * R_SPAWN_MAX));
+    row('Δt / step',       `${formatTime(stepDtPhysSec)} ${u(`(${(stepOverIsco * 100).toFixed(2)}% T_ISCO)`)}${accuracyFlag}`);
+    row('elapsed (BH proper)', formatTime(elapsedPhysSec));
+
+    sec(`accretion &nbsp;<span class="u">blackout below ${T_CUTOFF_K.toFixed(0)} K</span>`);
+    row('k_disk → M_d/M_BH', diskMassFraction().toExponential(1));
+    row('disk mass',       formatCompact(diskMassSolar, ' M☉'));
+    row('per particle',    formatCompact(currentParticleMassKg, ' kg'));
+    row('absorbed',        `${absorbedCount} ${u(`(ΔM/M = ${accretedFraction.toExponential(2)})`)}`);
+    row('safety recycles', `${safetyRecycleCount}`);
+    row('horizon breaches', `${horizonBreachCount}`);
+    row('T_peak',          formatCompact(temp0K, ' K'));
+    row('T_peak / T_edd',  formatCompact(temp0K / tEdd, ''));
+
+    sec('mass distribution');
+    row('shape extents',   `${shapeExtents[0].toFixed(1)}:${shapeExtents[1].toFixed(1)}:${shapeExtents[2].toFixed(1)} ${u('r_s')}`);
+    row('sphericity',      shapeSphericity.toFixed(2));
+    row('minor axis',      `(${shapeAxes[2][0].toFixed(2)}, ${shapeAxes[2][1].toFixed(2)}, ${shapeAxes[2][2].toFixed(2)})`);
+    row('live frame n̂',    `(${diskNormalLive[0].toFixed(2)}, ${diskNormalLive[1].toFixed(2)}, ${diskNormalLive[2].toFixed(2)})`);
+    row('frame source',    shapeSphericity < DISK_FRAME_SPHERICITY_MAX
+                             ? `<span class="ok">measured</span>`
+                             : `<span class="u">fallback: round cloud</span>`);
+
+    sec('polar map');
+    row('grid',            `${PG_NR}×${PG_NPHI} ${u(`@ ${PG_R_MIN.toFixed(1)}–${PG_R_MAX.toFixed(0)} r_s`)}`);
+    row('in-grid',         `${(100 * pgInGrid / Math.max(1, N)).toFixed(0)}%`);
+    row('cells occupied',  `${pgOccupied}/${PG_NR * PG_NPHI}`);
+    row('peak contrast',   `${pgPeakContrast.toFixed(1)}×`);
+    row('h(r) inner',      `${pgRingH[2].toFixed(2)} ${u('r_s')}`);
+    row('h(r) mid',        `${pgRingH[(PG_NR / 2) | 0].toFixed(2)} ${u('r_s')}`);
+    row('h(r) outer',      `${pgRingH[PG_NR - 3].toFixed(2)} ${u('r_s')}`);
+
+    // how hard is the disk pulling on itself, compared with the hole's own
+    // vertical restoring at the same height? >1 means self-gravitating.
+    {
+      const ri = (PG_NR / 2) | 0, ci = ri * PG_NPHI;
+      const rMid = Math.sqrt(pgREdges[ri] * pgREdges[ri + 1]), h = pgRingH[ri];
+      const aSelf = TWO_PI * pgSigma[ci];
+      const aBH   = GM * h / (rMid * rMid * rMid);
+      const mEnc  = enclosedDiskMass(rMid);
+      sec('self-gravity');
+      row(`M_disk(&lt;${rMid.toFixed(0)} r_s)/M_BH`, (mEnc / GM).toFixed(3));
+      row('sheet / BH vertical', (aSelf / Math.max(aBH, 1e-30)).toFixed(2));
+      row('settling', dragStrength > 0
+            ? `${(1 / (DISK_SETTLE_ZETA * dragStrength * 2 * Math.PI)).toFixed(1)} ${u('orbits')}`
+            : `<span class="u">off</span>`);
+    }
+
+    statsEl.innerHTML = `<table>${_rows.join('')}</table>`;
+
+  }
+
+  requestAnimationFrame(animate);
+}
+requestAnimationFrame(animate);
+</script>
+</body>
+</html>
