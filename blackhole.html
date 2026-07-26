@@ -18,7 +18,7 @@
   #sidepanel {
     position: absolute; top: 14px; left: 14px;
     width: 262px;
-    /* definite height, NOT max-height: a flex column can only hand a
+    /* definite height, not max-height: a flex column can only hand a
        resolvable height down to its children if it has one itself */
     height: calc(100vh - 28px);
     display: flex; flex-direction: column; gap: 8px;
@@ -252,7 +252,7 @@
         </div>
         <div class="row">
           <label><span>Full scale (log₁₀ L_vis)</span><output id="outBrightHi">8</output></label>
-          <input type="range" id="brightHiEl" min="0" max="12" step="0.1" value="8">
+          <input type="range" id="brightHiEl" min="0" max="20" step="0.1" value="8">
         </div>
         <div class="row">
           <label><span>Contrast γ</span><output id="outGamma">0.8</output></label>
@@ -366,31 +366,46 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 // =====================================================================
 //natural units mean M=0.5, r_s = 1, B_CRIT ~= 2.6
 const C = 1;
-const GM = 0.5;
-const RS = 2 * GM / (C*C);
-const B_CRIT = 3 * Math.sqrt(3) * GM / (C*C);
-const R_INNER_KILL = 2.5 * RS;
-const R_HITBOX = 15 * RS;
 
-// Camera exclusion zone. NOT a physical scale — it is the radius inside which
+// --- reference (unaccreted) scale --------------------------------------------
+// GM0/RS0 are the mass and horizon the hole is BORN with. They are what set the
+// internal<->physical scale (kmPerInternal below) and they anchor every length
+// that belongs to the FIXED SCENE the hole grows into (spawn annulus, hitbox,
+// escape radius, disk taper). Those scene constants are declared with `* RS0`
+// (or evaluated while RS === RS0) so they freeze at birth and the hole grows
+// RELATIVE to them.
+const GM0 = 0.5;
+const RS0 = 2 * GM0 / (C*C);   // == 1 three.js unit, by construction
+
+// --- live scale (grows with accretion) ---------------------------------------
+// GM/RS are mutated by applyMassGrowth() once per frame. Anything physically
+// tied to the HORIZON (near-hole kill/forbid radii, the photon-ring b_crit, the
+// lensing shaders via uRs/uBcrit, the ISCO) must read these live values or be
+// recomputed from them in applyMassGrowth() — never bake in RS === 1.
+let GM = GM0;
+let RS = RS0;
+let B_CRIT = 3 * Math.sqrt(3) * GM / (C*C);
+let R_INNER_KILL = 2.5 * RS;
+let R_HITBOX = 15 * RS;             // active-integration region — grows with the hole (bigger hole, bigger disk)
+const R_HITBOX0 = 15 * RS0;         // frozen birth hitbox: ONLY the lone star's orbit clamp reads this, so the star stays put
+
+// Camera exclusion zone. Intended as the radius inside which
 // the rendering approximations (thin-lens zeroth order, Born-approximation Kerr
-// correction, higher-order-image handling) stop being defensible. The shadow
-// half-angle for a static observer is ~28° at 5 r_s and ~14° at 10 r_s; below
-// ~5 r_s the background sky starts to wrap and the one-sample-per-pixel model
-// is the wrong data structure, not merely an inaccurate one.
-const R_FORBID = 2 * RS;   // TESTING VALUE (was 5): deliberately inside the
-                           // regime where the approximations are indefensible,
-                           // to make effect sizes large enough to judge.
+// correction, higher-order-image handling) stop being defensible. 
+// This is pragmatic to some extent, we are happy to push it a little beyond
+// what is technically "defensible". A reasonable comporomise would be 5*RS, 
+// using 2*RS is probably unreasonably close, but we'll use it just so the 
+// effects can become clearly visible.
+let R_FORBID = 2 * RS;   // grows with the horizon; controls.minDistance tracks it
 
-// Spawn annulus 
-// orbital speeds at the inner edge are genuinely relativistic. SAFE_SPAWN_FLOOR is
-// a hard clamp applied AFTER position noise, independent of how large
-// posNoise is set — no combination of slider values can spawn a particle
-// inside the horizon or immediately back into the recycle zone.
-const SAFE_SPAWN_FLOOR = 1.5 * RS;   // must be larger than R_INNER_KILL
-const R_SPAWN_MIN = 2.5 * RS;        // v_circ here ~0.75c — see stats readout
-const R_SPAWN_MAX = R_HITBOX * 3;
-const R_ESCAPE = R_SPAWN_MAX * 1.5;
+// Spawn annulus. These SCALE with the horizon: a heavier hole feeds a larger
+// disk, so fresh material spawns (and recycles) farther out as RS grows. Note
+// this only moves where NEW particles appear — existing particles keep their
+// orbits, so the hole genuinely gains on the material already present.
+let SAFE_SPAWN_FLOOR = 1.5 * RS;
+let R_SPAWN_MIN = 2.5 * RS;          // inner spawn floor; the ISCO (also ∝ GM) takes over via buildDiskProfile
+let R_SPAWN_MAX = R_HITBOX * 3;
+let R_ESCAPE = R_SPAWN_MAX * 1.5;
 
 // physical-unit conversion layer: purely a display/labeling layer on top of
 // the dimensionless (RS=1, GM=0.5, c=1) integrator above. Changing bhMassSolar
@@ -412,6 +427,15 @@ function diskMassInternal() { return diskMassFraction() * GM; }
 const MSUN_KG = 1.989e30;
 let bhMassSolar = 1e4;               // "intermediate" default, r_s ~= 30000 km, scene is a few light-seconds across (100*r_s ~= 0.02 AU)
 let bhSpin = 0;                      // dimensionless Kerr spin a* = Jc/(GM²) ∈ [0,1]; 0 = Schwarzschild
+// Spin is now DYNAMICAL: the slider sets a target/initial value (bhSpin0), and
+// accretion evolves it. bhAngMomInternal is the hole's total angular momentum J
+// about the +y spin axis in internal units (G=c=1, M_BH=GM), so a* = J/GM².
+// Absorbed particles add their L_y (see step()); a* is recomputed each frame in
+// applyMassGrowth(). Prograde disk ⇒ L_y > 0 ⇒ spin-up, exactly as a real
+// disk-fed hole spins toward the Thorne limit.
+let bhSpin0 = 0;                     // slider-set spin (the value reset restores)
+let bhAngMomInternal = 0;           // J about +y, internal units; a* = J/(GM·GM)
+const A_STAR_MAX = 0.998;           // Thorne limit — accretion cannot spin past this
 let sphericalSpawn = false;          // isotropic (spherical) initial distribution vs. flat disk
 let internalTimeElapsed = 0;         // accumulated internal time-units since page load
 
@@ -422,11 +446,12 @@ let internalTimeElapsed = 0;         // accumulated internal time-units since pa
 // machinery above). 
 let currentParticleMassKg = 0; // recomputed each frame from bhMassSolar/N — display + accretion bookkeeping only, never dynamical
 let accretedMassKg = 0;
+let massGrowthFactor = 1;      // M_now / M_ref; drives the live GM/RS in applyMassGrowth()
 let absorbedCount = 0;
-let safetyRecycleCount = 0;
-let horizonBreachCount = 0; // dedicated counter for the explicit r<=RS safety check below
+let escapeRecycleCount = 0;
+let horizonBreachCount = 0; // dedicated counter for the explicit r<=RS safety check
 
-const T_ISCO_INTERNAL = 2 * Math.PI * Math.sqrt(Math.pow(6*RS,3)/GM); // ISCO period
+let T_ISCO_INTERNAL = 2 * Math.PI * Math.sqrt(Math.pow(6*RS,3)/GM); // ISCO period (∝ M; recomputed in applyMassGrowth)
 
 let N = 80000;
 let kDisk = 0.2; // normalized [0,1] (disk mass)
@@ -568,10 +593,12 @@ let dragStrength = 0.2;
 const DRAG_SCALE = 2e-6; 
 
 const N_DRAG_BINS = 48;
-const DRAG_R_MIN = 1.2 * RS;
-const DRAG_R_MAX = R_ESCAPE;
+let DRAG_R_MIN = 1.2 * RS;            // grows with the hole (near-horizon inner cutoff)
+let DRAG_R_MAX = R_ESCAPE;           // = recycle radius, grows
 const dragBinEdges = new Float32Array(N_DRAG_BINS + 1);
 const dragBinVolumes = new Float32Array(N_DRAG_BINS);
+// Birth fill (RS === 1). rebuildScaleGeometry() below re-runs these same two
+// loops whenever the hole has grown — keep them in sync.
 for (let i = 0; i <= N_DRAG_BINS; i++) {
   dragBinEdges[i] = DRAG_R_MIN * Math.pow(DRAG_R_MAX / DRAG_R_MIN, i / N_DRAG_BINS);
 }
@@ -579,7 +606,7 @@ for (let i = 0; i < N_DRAG_BINS; i++) {
   const a = dragBinEdges[i], b = dragBinEdges[i + 1];
   dragBinVolumes[i] = (4 / 3) * Math.PI * (b*b*b - a*a*a);
 }
-const REFERENCE_VOLUME = (4 / 3) * Math.PI * Math.pow(DRAG_R_MAX, 3);
+let REFERENCE_VOLUME = (4 / 3) * Math.PI * Math.pow(DRAG_R_MAX, 3);  // grows as R_MAX³ so the drag norm stays calibrated
 const dragBinCounts = new Float32Array(N_DRAG_BINS);
 const dragBinDensityNorm = new Float32Array(N_DRAG_BINS).fill(1);
 // Enclosed DISK mass inside each bin's outer edge. The disk's own monopole was
@@ -641,12 +668,13 @@ function densityBinIndex(r) {
 //     Sigma (which sets the self-gravity) and h (which sets its softening).
 // Same single O(N) pass, fewer cells, far more particles per cell.
 const PG_NR = 24, PG_NPHI = 16;
-const PG_R_MIN = R_SPAWN_MIN * 0.6;
-const PG_R_MAX = R_ESCAPE;
-const PG_LOGSPAN = Math.log(PG_R_MAX / PG_R_MIN);
+let PG_R_MIN = R_SPAWN_MIN * 0.6;    // grows with the spawn floor
+let PG_R_MAX = R_ESCAPE;             // grows with the recycle radius
+const PG_LOGSPAN = Math.log(PG_R_MAX / PG_R_MIN);  // scale-INVARIANT: both bounds ∝ RS, so the ratio is fixed
 const pgREdges  = new Float32Array(PG_NR + 1);
 const pgCellArea = new Float32Array(PG_NR);   // area of ONE (R,phi) cell in ring i
 const pgRingArea = new Float32Array(PG_NR);   // full annulus area
+// Birth fill (RS === 1); rebuildScaleGeometry() re-runs these on growth.
 for (let i = 0; i <= PG_NR; i++) pgREdges[i] = PG_R_MIN * Math.exp(PG_LOGSPAN * i / PG_NR);
 for (let i = 0; i < PG_NR; i++) {
   const a = pgREdges[i], b = pgREdges[i+1];
@@ -666,7 +694,34 @@ let pgInGrid = 0, pgOccupied = 0, pgPeakContrast = 1;
 // a floor the disk collapses onto the plane, h -> 0, and the near-plane spring
 // constant 2*pi*G*Sigma/h runs away -- there is no pressure support in this sim
 // to stop it.
-const PG_H_MIN = 0.12 * RS;
+let PG_H_MIN = 0.12 * RS;
+
+// Refill every scale-dependent bin geometry from the CURRENT horizon. The bounds
+// themselves (DRAG_R_*, PG_R_*) are set from the live spawn/escape radii, then the
+// edge/area/volume tables are rebuilt. Called from applyMassGrowth() once the hole
+// has grown ~2%. The per-frame density/drag ACCUMULATION (counts, Sigma) is
+// unaffected — only this fixed geometry needs to follow RS. Loop bodies mirror the
+// birth fills above; keep them in sync.
+function rebuildScaleGeometry() {
+  DRAG_R_MIN = 1.2 * RS;
+  DRAG_R_MAX = R_ESCAPE;
+  PG_R_MIN   = R_SPAWN_MIN * 0.6;
+  PG_R_MAX   = R_ESCAPE;
+  // PG_LOGSPAN and DRAG_R_MAX/DRAG_R_MIN are scale-invariant, so they need no update.
+  for (let i = 0; i <= N_DRAG_BINS; i++)
+    dragBinEdges[i] = DRAG_R_MIN * Math.pow(DRAG_R_MAX / DRAG_R_MIN, i / N_DRAG_BINS);
+  for (let i = 0; i < N_DRAG_BINS; i++) {
+    const a = dragBinEdges[i], b = dragBinEdges[i + 1];
+    dragBinVolumes[i] = (4 / 3) * Math.PI * (b*b*b - a*a*a);
+  }
+  REFERENCE_VOLUME = (4 / 3) * Math.PI * Math.pow(DRAG_R_MAX, 3);
+  for (let i = 0; i <= PG_NR; i++) pgREdges[i] = PG_R_MIN * Math.exp(PG_LOGSPAN * i / PG_NR);
+  for (let i = 0; i < PG_NR; i++) {
+    const a = pgREdges[i], b = pgREdges[i+1];
+    pgRingArea[i] = Math.PI * (b*b - a*a);
+    pgCellArea[i] = pgRingArea[i] / PG_NPHI;
+  }
+}
 
 function pgRingIndexOf(R) {
   if (R < PG_R_MIN || R > PG_R_MAX) return -1;
@@ -814,8 +869,8 @@ function buildDensityMap() {
 }
 
 const diskNormal = [0, 1, 0];        // spawn/reference plane; also the fallback
-const H_TAPER_START = 5 * RS;
-const H_CUTOFF = 9 * RS;
+let H_TAPER_START = 5 * RS;   // (currently unused) grows with the disk if wired back in
+let H_CUTOFF = 9 * RS;
 
 // measure live disk frame:
 // The shape tensor's MINOR principal axis is the disk normal. Three cautions:
@@ -848,7 +903,14 @@ let lastInsideCount = 0;
 let lastAvgG = 1;
 
 function vCircular(r) {
-  return Math.sqrt(GM * r) / (r - RS);
+  // Circular speed for the SEED central mass GM0 with the grown RS pole — matches
+  // the point-mass term in step() exactly, so respawned material orbits at the
+  // speed the dynamics actually provide instead of being flung out (or dropped in)
+  // by a hole that "created" mass through accretion. As RS grows toward r the
+  // required speed rises (denominator shrinks), so the expanding horizon still
+  // strips the inner disk; the far disk (r≫RS) stays at √(GM0/r), unchanged by
+  // accretion. At g=1 (RS==RS0) this is the original √(GM0·r)/(r−RS).
+  return Math.sqrt(GM0 * r) / (r - RS);
 }
 function celerityFromSpeed(v) {
   const gamma = 1 / Math.sqrt(Math.max(1e-9, 1 - v*v/(C*C)));
@@ -893,7 +955,7 @@ function iscoRadius(aStar) {
 // gives the disk a soft inner edge instead of a wall, and it puts the emission
 // peak at r = (49/36)·r_in ≈ 1.36 r_in, not at the edge itself.
 //
-// DISK_SAMPLING_INDEX is a SAMPLING choice, not physics, and it is a genuine
+// DISK_SAMPLING_INDEX is a sampling choice, not physics, and it is a genuine
 // trade-off because every particle carries the same mass:
 //   0     — log-uniform. Best inner-region resolution, but implies Σ ∝ r^-2,
 //           steeper than any real disk, so the density map over-weights the
@@ -923,12 +985,8 @@ const DISK_OUTER_TAPER = 0.55;   // × R_SPAWN_MAX = the roll-off radius R_c
 // Protoplanetary disks show them unambiguously (ALMA/HL Tau). So: defensible as
 // an evolved structure, not as a steady-state solution.
 //
-// Generated as a sum of Gaussian bumps in ln r rather than a warped coordinate.
-// A coordinate warp like r -> r + sin(a·r^(1+ε)) has two problems: it is exactly
-// periodic (reads as machined), and once the map's derivative goes negative it
-// folds, producing uncontrolled caustic spikes in density. Modulating the PDF
-// and sampling by inverse-CDF avoids both — amplitude, width and position are
-// independent per ring, and negative amplitudes give gaps rather than folds.
+// Generated as a sum of Gaussian bumps in ln r rather than a 
+// coordinate warp like r -> r + sin(a·r^(1+ε)), which would look too artificial.
 // Roughly log-periodic spacing is deliberate: resonant and instability-driven
 // structure tends to be self-similar in radius, not equally spaced in r.
 const RING_COUNT = 6;
@@ -943,7 +1001,7 @@ let diskInnerEdge = 3 * RS;
 let profileLogMin = 0, profileLogSpan = 1;
 
 // ---- sampling table ---------------------------------------------------------
-// The CDF is inverted ONCE at build time onto a uniform grid in u, so drawing a
+// The CDF is inverted once at build time onto a uniform grid in u, so drawing a
 // radius is a table lookup plus one lerp -- no binary search, no branch, no
 // transcendental. This is the difference between a spawn costing ~10 ns and
 // ~150 ns, which matters when a full disk regeneration is 50k+ calls.
@@ -951,8 +1009,7 @@ const INVCDF_BINS = 1024;
 const invCDFLogR = new Float64Array(INVCDF_BINS + 1);
 
 // Compact quartic bump instead of exp(-d²/2): identical shape to the eye, zero
-// outside |d| > 1, and no transcendental. The profile build is only ~2300
-// evaluations so this is not where the time goes -- it is just free.
+// outside |d| > 1, and no transcendental. The profile build is only ~2300 evaluations
 function ringBump(d) {
   const a = d < 0 ? -d : d;
   if (a >= 1) return 0;
@@ -968,17 +1025,16 @@ function ringModulation(lnR) {
   return m < 0.05 ? 0.05 : m;   // never let a gap go completely empty
 }
 
-// The profile is rebuilt lazily and at most once per dirty-flag flip. Rebuilding
-// it costs ~2300 bump evaluations; calling it once per particle instead of once
-// per reset is a 50000x multiplier and turns a 1 ms job into an 8 s freeze, so
-// the guard is here rather than in a comment. Flip the flag from resetAll(), the
-// spin slider, and anything that moves R_SPAWN_MAX / velNoise.
+// The profile is rebuilt lazily and at most once per dirty-flag flip.
 let diskProfileDirty = true;
+let profileBuiltRS = RS;   // the horizon scale the current profile was built at
+let profileBuiltSpin = bhSpin;  // the spin the current profile (ISCO) was built at
 function markDiskProfileDirty() { diskProfileDirty = true; }
 function ensureDiskProfile() { if (diskProfileDirty) buildDiskProfile(); }
 
 function buildDiskProfile() {
   diskProfileDirty = false;
+  profileBuiltRS = RS;   // inner edge (ISCO) tracks GM, so remember what GM we baked in
   // R_SPAWN_MIN stays a hard floor; the ISCO takes over whenever it is larger.
   diskInnerEdge = Math.max(R_SPAWN_MIN, iscoRadius(bhSpin));
   profileLogMin = Math.log(diskInnerEdge);
@@ -989,9 +1045,7 @@ function buildDiskProfile() {
   // Width is tied to the epicyclic smearing they have to survive. A velocity
   // perturbation of velNoise gives eccentricity e ~ 2*velNoise, i.e. a radial
   // excursion of +/- 2*velNoise in ln r, and any ring narrower than that is
-  // erased inside the first orbit -- which is why the previous 6-16% wide rings
-  // were invisible at the default velNoise = 0.08 (+/-16%).
-  //
+  // erased inside the first orbit.
   // Amplitude keeps a minimum magnitude: drawing uniformly on [-A, A] put
   // several rings near zero contrast every time, so only two or three of nine
   // were ever visible.
@@ -1094,7 +1148,7 @@ function spawnParticle(i, init = true) {
   let x, y, z, vx, vy, vz;
   if (sphericalSpawn) {
     // isotropic cloud: random point on the sphere of radius r, with a circular
-    // orbit in a RANDOMLY oriented plane. This populates all inclinations so the
+    // orbit in a randomly oriented plane. This populates all inclinations so the
     // Kerr frame-dragging (nodal precession of tilted orbits) becomes visible.
     const u = Math.random()*2 - 1, phi = Math.random()*Math.PI*2;
     const s = Math.sqrt(Math.max(0, 1 - u*u));
@@ -1107,10 +1161,8 @@ function spawnParticle(i, init = true) {
     let tl = Math.hypot(tx, ty, tz);
     if (tl < 1e-3) { tx = -rz; ty = 0; tz = rx; tl = Math.hypot(tx, ty, tz) || 1; } // r∥random guard
     // Single handedness: all inclinations are populated, but every orbit is
-    // PROGRADE about the spin/disk axis. L = r x v, so requiring L·n̂ > 0 and
-    // flipping the tangent otherwise gives a cloud that shares one sense of
-    // rotation instead of two counter-rotating halves cancelling to zero net
-    // angular momentum.
+    // prograde about the spin/disk axis. L = r x v, so requiring L·n̂ > 0 and
+    // flipping the tangent otherwise.
     const lDotN = (ry*tz - rz*ty)*diskNormal[0]
                 + (rz*tx - rx*tz)*diskNormal[1]
                 + (rx*ty - ry*tx)*diskNormal[2];
@@ -1120,7 +1172,7 @@ function spawnParticle(i, init = true) {
     const az = Math.random() * Math.PI * 2;
     x = r * Math.cos(az); y = 0; z = r * Math.sin(az);
     // orbital direction inverted (vs the naive -sin/+cos tangent) purely
-    // cosmetically, so the disk's north pole faces up in the default view
+    // conventional, so the disk's north pole faces up in the default view
     vx = Math.sin(az) * vmag; vy = 0; vz = -Math.cos(az) * vmag;
   }
 
@@ -1192,6 +1244,12 @@ function step(dt) {
   const hPol2 = rPlusH*rPlusH;              // polar radius²       (= RS² at a=0)
   const kerrHorizon = bhSpin > 0;
 
+  // Per-particle mass in INTERNAL units (same convention as M_BH = GM), used to
+  // accrete angular momentum on absorption below. Same physical particle whose
+  // kg-equivalent (currentParticleMassKg) drives the mass growth — just the
+  // internal-unit form needed for a* = J/GM².
+  const mPartInternal = diskMassInternal() / Math.max(1, N);
+
   //particle mechanics:
   // todo: more sophisticated viscosity, disk bias, falling-in trajectories
   // also includes an approximation of Kerr metric frame-dragging (nice to have, but gives no perceptible result, you'd have to track a given particle for a couple of orbits for this to become apparent).
@@ -1237,21 +1295,34 @@ function step(dt) {
     let accelMag;
     if (insideHitbox) {
       const rSafe = Math.max(r - RS, 0.05);
-      accelMag = GM / (rSafe*rSafe);
+      accelMag = GM0 / (rSafe*rSafe);
     } else {
-      accelMag = GM / Math.max(r*r, 1e-6);
+      accelMag = GM0 / Math.max(r*r, 1e-6);
     }
     let invR3term = accelMag / Math.max(r, 1e-6);
 
-    // Disk monopole: the enclosed disk mass pulls like extra central mass.
-    // Newton's shell result does not hold for a flattened body, but inside a
-    // thin disk the enclosed-mass approximation is the standard first cut and
-    // it is what makes k_disk mean "how much does the disk's gravity matter
-    // next to the hole's". At k_disk = 1 this is a ~50% boost to the effective
-    // central mass at mid-disk, so orbits go visibly non-Keplerian and the
-    // vertical epicyclic frequency rises with it.
+    // --- accretion mass conservation --------------------------------------------
+    // accelMag above uses the SEED mass GM0, not the accretion-grown GM. Rationale:
+    // the mass booked into GM by accretion was disk material already interior to
+    // these orbits, and — because absorbed particles respawn at the outer edge — it
+    // recycles straight back into the disk monopole below. Letting it inflate the
+    // central attraction would double-count it and spuriously speed up the whole
+    // disk as the hole grows (outer orbits suddenly sub-Keplerian, sinking in for
+    // no physical reason). Using GM0 with the GROWN RS pole keeps the far field at
+    // the conserved value GM0/r² while the (larger) horizon still swallows material
+    // geometrically: the hole gains on the disk via an expanding RS, not via a
+    // rising pull. Its PW-ISCO sits at 3·RS (grown), matching the spawn inner edge.
+
+    // Disk monopole: the enclosed disk mass pulls like extra central mass. Newton's
+    // shell result does not hold for a flattened body, but inside a thin disk the
+    // enclosed-mass approximation is the standard first cut and it is what makes
+    // k_disk mean "how much does the disk's gravity matter next to the hole's".
+    // Held at the SEED disk-mass budget (× GM0/GM) so it, too, does not inflate as
+    // the nominal disk mass (k·GM) tracks the growing hole. With the seed-mass point
+    // term above, M_eff(r) → GM0 + seed·disk(<r): conserved under the disk→BH
+    // transfer, so orbital speeds stay attuned to the mass that was always interior.
     if (kDisk > 0) {
-      invR3term += enclosedDiskMass(r) / Math.max(r*r*r, 1e-12);
+      invR3term += enclosedDiskMass(r) * (GM0 / GM) / Math.max(r*r*r, 1e-12);
     }
 
     let ax = -px * invR3term;
@@ -1263,25 +1334,21 @@ function step(dt) {
     // Sigma the vertical field just off the plane is 2*pi*G*Sigma, independent of
     // height -- so the profile is flat outside the disk and linear inside it,
     // which is exactly tanh(z/h). Sigma comes from the polar map and h from that
-    // ring's <z^2>, so both are measured per frame rather than assumed.
-    //
-    // This is genuinely weaker than the old spring at small kDisk and genuinely
-    // stronger at large kDisk, because it now means something: at kDisk = 1 the
-    // disk masses as much as the hole.
+    // ring's <z^2>, so both are measured per frame.
     if (pgCell[i] >= 0 && (kDisk > 0 || dragStrength > 0)) {
       const nrm = diskNormalLive;
       let aV = 0;
       // (a) CONSERVATIVE: the disk's own vertical gravity. Genuinely weak unless
-      //     the disk is a sizeable fraction of M_BH -- which is the honest answer,
-      //     and why the slider only bites in its upper range.
+      //     the disk is a sizeable fraction of M_BH 
+      //     so  the slider will only have a significant effect  in its upper range.
       if (kDisk > 0) {
         aV -= TWO_PI * pgSigma[pgCell[i]] * Math.tanh(pgZ[i] / pgRingH[pgRing[i]]);
       }
       // (b) DISSIPATIVE: viscous settling, and the term that actually flattens the
       //     disk. For a point-mass potential the vertical epicyclic frequency is
       //     just the orbital frequency, so damping at 2*zeta*Omega gives a settling
-      //     time of a fixed number of ORBITS at every radius rather than a fixed
-      //     number of ticks -- the inner disk flattens first, as it should.
+      //     time of a fixed number of orbits at every radius rather than a fixed
+      //     number of ticks, the inner disk flattens first (as it should).
       if (dragStrength > 0) {
         const omega = Math.sqrt(GM / Math.max(r*r*r, 1e-12));
         const qh = qx0*nrm[0] + qy0*nrm[1] + qz0*nrm[2];
@@ -1292,11 +1359,11 @@ function step(dt) {
       az += aV * nrm[2];
     }
 
-    // viscosity/drag heuristic: proportional to velocity AT THE START of this
+    // viscosity/drag heuristic: proportional to velocity at the start of this
     // step, scaled by the coarse local density built once per frame.
     if (dragStrength > 0) {
       // Radial profile (smooth background, unchanged and already tuned) times the
-      // LOCAL azimuthal contrast from the polar map: a particle sitting in a clump
+      // local azimuthal contrast from the polar map: a particle sitting in a clump
       // or an arm sees denser gas than the ring average and drags harder, which is
       // the whole point of keeping an (R,phi) map rather than a radial histogram.
       const contrast = pgCell[i] >= 0 ? pgContrast[pgCell[i]] : 1;
@@ -1363,29 +1430,27 @@ function step(dt) {
       breached = nr <= RS;
     }
     if (breached) {
-      // emergency despawn — the only unconditional inner removal. A particle
-      // must never numerically end up inside the actual horizon, however it got
-      // there (e.g. an extreme sim-speed step). Ordinarily should never fire.
+      // emergency despawn — unconditional inner removal. Ordinarily should never fire.
       horizonBreachCount++;
+      absorbedCount++;
+      accretedMassKg += currentParticleMassKg;
+      bhAngMomInternal += mPartInternal * (nz*qx - nx*qz);   // L_y = (r × u)_y
       spawnParticle(i, false);
     } else if (nr < R_INNER_KILL && tBlackout < T_CUTOFF_K) {
-      // accretion: absorbed only when BOTH inside R_INNER_KILL AND blacked out.
+      // accretion: absorbed only when *both* inside R_INNER_KILL and blacked out.
       // R_INNER_KILL is no longer an unconditional kill radius — it's just the
-      // outer bound within which blackout is even tested. Cold material OUTSIDE
+      // outer bound within which blackout is even tested. Cold material outside
       // this radius (far & dim, but g≈1 and not infalling) is retained and left
       // to escape and recycle at R_ESCAPE. Strictly inside 1.3 r_s here, so
       // everything is genuinely infalling: near the horizon g collapses, driving
       // tBlackout → 0 regardless of temp0K, so absorption still happens even at
       // low slider values (no permanent freeze / performance sink at the horizon).
       accretedMassKg += currentParticleMassKg;
+      bhAngMomInternal += mPartInternal * (nz*qx - nx*qz);   // L_y = (r × u)_y, u = celerity
       absorbedCount++;
       spawnParticle(i, false);
-    } else if (nr > R_ESCAPE) {
-      // escape recycle: the only remaining outer recycle. Escapees now land here
-      // instead of tripping the old blackout branch first, so safetyRecycleCount
-      // increments correctly and the accretion tally is no longer polluted by
-      // outbound material.
-      safetyRecycleCount++;
+    } else if (nr > R_ESCAPE) {  // respawn escaped particles
+      escapeRecycleCount++;
       spawnParticle(i, false);
     } else {
       pos[ix] = nx; pos[ix+1] = ny; pos[ix+2] = nz;
@@ -1423,10 +1488,10 @@ const MAX_IMAGE_ORDER = 2;
 // live only in the vertex shaders (solvePrimaryTheta / deflectionAngle in GLSL);
 // the JS copies were retired with the JS-path k=0 rendering.
 
-// hoBrightness: per-order brightness as ADDITIVE log10 offsets (our brightness pipeline is already logarithmic). 
+// hoBrightness: per-order brightness as additive log10 offsets (our brightness pipeline is already logarithmic). 
 // 0.6 -> log10(0.6)≈-0.222; 0.2 -> log10(0.2)≈-0.699.
 // These are the tunable "cheat" — physically each order dims by ~e^-π≈0.04,
-// hoBrightness is the "keep" fraction per order, stacked MULTIPLICATIVELY:
+// hoBrightness is the "keep" fraction per order, stacked multiplicatively:
 // order k is scaled by hoBrightness^k, i.e. offset by k*log10(hoBrightness) dex.
 // hoBrightness=1 means no reduction; nothing ever reaches exactly zero, so no
 // order winks out abruptly. (The old linear form max(0, 1-k*(1-h)) extinguished
@@ -1728,7 +1793,7 @@ critLUTTex.magFilter = THREE.LinearFilter;
 critLUTTex.minFilter = THREE.LinearFilter;
 critLUTTex.wrapS = THREE.RepeatWrapping;     // φ wraps at 0 / 2π
 critLUTTex.needsUpdate = true;
-let critLUTSpin = -1, critLUTTheta = -999;   // dirty-check cache
+let critLUTSpin = -1, critLUTTheta = -999, critLUTBcrit = -1;   // dirty-check cache: spin, inclination, hole scale
 
 function kerrXiEta(r, a) {
   const xi  = (r*r*(3*GM - r) - a*a*(r + GM)) / (a*(r - GM));
@@ -1739,9 +1804,17 @@ const _critPhi = [], _critR = [];
 // Rebuild r_crit(φ) for the current spin a* and observer inclination θo (radians
 // from the spin axis). Skips work when neither changed appreciably.
 function updateCritLUT(bhSpin, thetaO) {
+  // Rebuild when spin, inclination, OR the hole's SCALE changes. The scale term is
+  // essential once the hole can grow: the whole critical curve (and the a=0 circle)
+  // ∝ GM, i.e. ∝ B_CRIT, but uRs/uBcrit are pushed to the shaders live every frame.
+  // A LUT frozen at an old scale — which happens whenever spin holds still while
+  // accretion continues, most obviously once a* pins at the 0.998 cap — leaves the
+  // LUT's rcrit out of sync with the live uRs in higherOrderDir, and the higher-
+  // order images blow up into a 1:1 copy of the disk. Refresh on B_CRIT drift too.
   if (Math.abs(bhSpin - critLUTSpin) < 1e-4 &&
-      Math.abs(thetaO - critLUTTheta) < 0.5*Math.PI/180) return;
-  critLUTSpin = bhSpin; critLUTTheta = thetaO;
+      Math.abs(thetaO - critLUTTheta) < 0.5*Math.PI/180 &&
+      Math.abs(B_CRIT - critLUTBcrit) < 0.005*critLUTBcrit) return;
+  critLUTSpin = bhSpin; critLUTTheta = thetaO; critLUTBcrit = B_CRIT;
   if (bhSpin < 1e-4) {  // Scharzschild case
     for (let i = 0; i < CRIT_LUT_N; i++) critLUTData[i*4] = B_CRIT; // restore circle (seems wasteful, just give the shader a "Schwarzschild pass" that skips this entirely?)
     critLUTTex.needsUpdate = true; return;
@@ -1763,6 +1836,28 @@ function updateCritLUT(bhSpin, thetaO) {
   const idx = _critPhi.map((_, k) => k).sort((p, q) => _critPhi[p] - _critPhi[q]);
   const ph = idx.map(k => _critPhi[k]), rr = idx.map(k => _critR[k]);
   const NP = ph.length;
+
+  // Coverage guard. The spherical-photon-orbit parametrization only yields points
+  // where β² ≥ 0; at small a* (and, less severely, near pole-on) that band is a
+  // thin arc clustered in azimuth, leaving large φ gaps the interpolation below
+  // would fill with garbage — or, at a* ≲ 0.003, ZERO points and a NaN LUT. That
+  // is the "spin-up from a*=0" artifact: a hole growing out of Schwarzschild
+  // creeps through this sparse band during its first moments of accretion, the
+  // higher-order images read a broken rcrit and balloon into a 1:1 copy of the
+  // disk, and it only clears once a* leaves the band (hence starting at finite
+  // spin, or nudging the slider, never shows it). Whenever coverage is poor the
+  // true critical curve is near-circular anyway, so fall back to a uniform ring
+  // at the mean valid radius — which stays correct even for the shrunken pole-on
+  // shadow at high spin (mean radius, not the a=0 b_crit). b_crit only when there
+  // are literally no points to average.
+  let maxGap = NP >= 2 ? (ph[0] + 2*Math.PI - ph[NP-1]) : 2*Math.PI; // wrap-around gap
+  for (let i = 1; i < NP; i++) maxGap = Math.max(maxGap, ph[i] - ph[i-1]);
+  if (NP < 2 || maxGap > 40*Math.PI/180) {
+    const rUniform = NP > 0 ? rr.reduce((s, v) => s + v, 0) / NP : B_CRIT;
+    for (let i = 0; i < CRIT_LUT_N; i++) critLUTData[i*4] = rUniform;
+    critLUTTex.needsUpdate = true; return;
+  }
+
   for (let i = 0; i < CRIT_LUT_N; i++) {
     const phi = 2*Math.PI*(i + 0.5)/CRIT_LUT_N; // texel centre
     let val;
@@ -1889,9 +1984,11 @@ function tidalRadiusInternal() {
 }
 // Minimum safe periapsis (internal): the larger of the tidal limit and a small
 // margin outside the hitbox, so the star is always both intact and outside the
-// strong-field capture region.
+// strong-field capture region. Uses the FROZEN birth hitbox (R_HITBOX0) and the
+// reference mass, so the lone star's orbit is never dragged outward as the hole
+// grows — the star is a fixed showpiece, left alone per design.
 function minSafePeriapsisInternal() {
-  return Math.max(TIDAL_SAFETY * tidalRadiusInternal(), R_HITBOX * 1.05);
+  return Math.max(TIDAL_SAFETY * tidalRadiusInternal(), R_HITBOX0 * 1.05);
 }
 // Clamp (a,e) so a(1-e) >= min safe periapsis. Returns true if it had to clamp.
 function clampStarOrbitSafe() {
@@ -2464,6 +2561,8 @@ function updateStar(dtInternal) {
   const gam = 1 / Math.sqrt(1 - v2);
 
   const u = starMaterial.uniforms;
+  u.uRs.value = RS;         // live horizon scale (hole grows as it accretes)
+  u.uBcrit.value = B_CRIT;
   u.uCamPos.value.copy(camera.position);
   u.uStarPos.value.copy(_starPos);
   u.uStarVel.value.set(vx*gam, vy*gam, vz*gam);
@@ -3103,6 +3202,8 @@ function updateStarfield() {
   starfield.visible = starfieldEnabled;
   if (!starfieldEnabled) return;
   const u = starfield.material.uniforms;
+  u.uRs.value = RS;         // live horizon scale
+  u.uBcrit.value = B_CRIT;
   u.uCamPos.value.copy(camera.position);
   u.uBhSpin.value = bhSpin;
   u.uLensStrength.value = lensStrength;
@@ -3138,6 +3239,9 @@ function updateParticleBuffers() {
 
   // per-frame uniforms
   const u = particleSystem.material.uniforms;
+  u.uRs.value = RS;         // live horizon scale
+  u.uBcrit.value = B_CRIT;
+  u.uRHitbox.value = R_HITBOX;   // grows with the hole (inside-hitbox debug tint)
   u.uCamPos.value.set(camX, camY, camZ);
   u.uHoBright.value = hoBrightness;
   u.uBhSpin.value = bhSpin;
@@ -3251,14 +3355,21 @@ document.getElementById('outBeamC').textContent = beamingC.toFixed(1);
 document.getElementById('outBetaCut').textContent = betaDopplerCutoff.toFixed(2);
 
 function resetAll() {
+  // Wipe accretion FIRST, then snap GM/RS/spin back to birth scale, so everything
+  // rebuilt below (ISCO/disk profile, star clamp) sees the reference hole rather
+  // than a grown/spun-up one left over from the previous run.
+  accretedMassKg = 0;
+  bhSpin = bhSpin0;
+  bhAngMomInternal = bhSpin0 * GM0 * GM0;  // J = a*·M² at birth mass, seeded BEFORE the recompute
+  applyMassGrowth();          // g -> 1: restores GM/RS/derived AND recomputes bhSpin = J/GM0² = bhSpin0
+  profileBuiltSpin = bhSpin;
   initPhysics();
   buildParticleSystem();
   clampStarOrbitSafe();
   buildStar();
   star.meanAnomaly = 0;
-  accretedMassKg = 0;
   absorbedCount = 0;
-  safetyRecycleCount = 0;
+  escapeRecycleCount = 0;
   horizonBreachCount = 0;
   internalTimeElapsed = 0;
 }
@@ -3288,7 +3399,10 @@ mEl.addEventListener('input', () => {
   buildStar();
 });
 document.getElementById('bhSpinEl').addEventListener('input', (e) => {
-  bhSpin = parseFloat(e.target.value);
+  bhSpin0 = parseFloat(e.target.value);
+  bhSpin = bhSpin0;
+  bhAngMomInternal = bhSpin0 * GM * GM;   // J = a*·M² at the current mass; accretion evolves it from here
+  profileBuiltSpin = bhSpin;
   buildDiskProfile();
   document.getElementById('outBhSpin').textContent = bhSpin.toFixed(2) + (bhSpin > 0 ? ' (Kerr)' : ' (Schwarzschild)');
 });
@@ -3455,9 +3569,91 @@ function segmentEntersSphere(a, b, R) {
 }
 
 
+// =====================================================================
+// MASS GROWTH  —  the hole grows in three.js space as it accretes
+// ---------------------------------------------------------------------
+// Single source of truth for the live horizon scale. Called once at the top of
+// every frame, BEFORE the observer gate, the physics substeps, and the uniform
+// pushes, so nothing in a frame ever sees a half-updated GM/RS.
+//
+//   g = M_now / M_ref = 1 + accretedMassKg / (bhMassSolar · M_sun)
+//
+// bhMassSolar is the REFERENCE mass that fixed the internal<->km scale
+// (kmPerInternal); it is deliberately NOT the growing mass, so km-per-three.js
+// stays constant and "the hole doubled in three.js units" == "the hole doubled
+// in km".
+//
+// Scaling model: a heavier hole feeds a LARGER disk, so nearly every length
+// scales with the horizon (GM, RS, b_crit, the near-hole kill/forbid radii, the
+// ISCO, AND the spawn/escape/active-region radii + their bin geometry). Two
+// things are deliberately anchored elsewhere:
+//   • existing particles are never moved — they integrate under the growing GM,
+//     so the hole genuinely gains on the orbits already present;
+//   • the lone star's orbit is pinned to the fixed physical scale (auPerInternal,
+//     which uses the reference mass) and its safe-periapsis clamp reads the frozen
+//     R_HITBOX0, so it stays put while everything else scales.
+// Over a long run the freshly-fed disk therefore grows uniformly with the hole,
+// but at any instant the hole is overtaking the material currently in orbit.
+//
+// Positive feedback is intentional: diskMassInternal() = k·GM grows with GM, so
+// each particle's dynamical AND booked mass rises as the hole grows, accelerating
+// accretion. Exponential, not divergent (each frame adds a bounded increment);
+// lower k_disk or simSpeed if it runs away faster than you'd like.
+function applyMassGrowth() {
+  const mRefKg = bhMassSolar * MSUN_KG;
+  const g = mRefKg > 0 ? 1 + accretedMassKg / mRefKg : 1;
+  massGrowthFactor = g;
+
+  GM = GM0 * g;
+  RS = RS0 * g;                                   // == 2·GM/c², kept in lockstep
+  B_CRIT        = 3 * Math.sqrt(3) * GM / (C*C);  // photon ring grows with the hole
+  R_INNER_KILL  = 2.5 * RS;
+  R_FORBID      = 2.0 * RS;
+  SAFE_SPAWN_FLOOR = 1.5 * RS;
+  T_ISCO_INTERNAL  = 2 * Math.PI * Math.sqrt(Math.pow(6*RS,3)/GM); // ∝ g
+
+  // Spin from accreted angular momentum: a* = J / M² (internal, M = GM). Keep J
+  // physical — never super-extremal, never retrograde (the +y axis is fixed, so
+  // a retrograde-dominated disk just spins the hole down to Schwarzschild rather
+  // than flipping it). The cap tracks GM², so a near-extremal hole stays there as
+  // it gains mass instead of being frozen by a stale J ceiling.
+  const jMax = A_STAR_MAX * GM * GM;
+  if (bhAngMomInternal > jMax) bhAngMomInternal = jMax;
+  if (bhAngMomInternal < 0)    bhAngMomInternal = 0;
+  bhSpin = bhAngMomInternal / (GM * GM);
+
+  // Scene radii: a bigger hole feeds a bigger disk, so spawn/escape/active region
+  // all scale with the horizon. (Existing particles stay put; only where NEW ones
+  // appear moves outward.)
+  R_HITBOX      = 15 * RS;
+  R_SPAWN_MIN   = 2.5 * RS;
+  R_SPAWN_MAX   = R_HITBOX * 3;
+  R_ESCAPE      = R_SPAWN_MAX * 1.5;
+  H_TAPER_START = 5 * RS;
+  H_CUTOFF      = 9 * RS;
+  PG_H_MIN      = 0.12 * RS;
+
+  // Camera exclusion tracks the growing horizon so you can't end up inside it.
+  controls.minDistance = R_FORBID;
+
+  // Rebuild the disk sampling profile + bin geometry when EITHER the horizon has
+  // grown ~2% (ISCO ∝ GM, spawn/escape range larger) OR the spin has shifted
+  // enough to move the ISCO (r_isco depends strongly on a*). Both are cheap and
+  // only newly spawned/binned material cares, so a threshold beats every-frame.
+  if (Math.abs(RS - profileBuiltRS) > 0.02 * profileBuiltRS ||
+      Math.abs(bhSpin - profileBuiltSpin) > 0.01) {
+    diskProfileDirty = true;
+    rebuildScaleGeometry();
+    profileBuiltRS = RS;
+    profileBuiltSpin = bhSpin;
+  }
+}
+
 function animate(now) {
   const realDt = Math.min(0.05, (now - last) / 1000);
   last = now;
+
+  applyMassGrowth();   // update GM/RS/derived + minDistance before anything reads them
 
   // Veto any camera move whose *path* enters the forbidden sphere around the BH.
   // minDistance only constrains camera-to-target; panning slides the target off
@@ -3523,9 +3719,10 @@ function animate(now) {
     horizonGroup.scale.set(rEqW, rPlusW, rEqW); // equatorial in x,z; polar r₊ in y
   }
 
-  // per-particle mass, recomputed live from bhMassSolar/N — used only for
-  // the accretion tally below, never for dynamics.
-  currentParticleMassKg = (bhMassSolar * diskMassFraction() / Math.max(1, N)) * MSUN_KG;
+  // per-particle mass, recomputed live from the CURRENT hole mass / N — used only
+  // for the accretion tally below, never for dynamics. The massGrowthFactor is
+  // what makes accretion self-reinforce: current disk mass = k·(M_ref·g).
+  currentParticleMassKg = (bhMassSolar * massGrowthFactor * diskMassFraction() / Math.max(1, N)) * MSUN_KG;
 
   // coarse density map for drag + distribution aggregates (shape tensor,
   // voxel grid): rebuilt once per frame (not per substep) — coarse heuristics,
@@ -3570,13 +3767,14 @@ function animate(now) {
     const fps = Math.round(frameCount / fpsAccum);
     frameCount = 0; fpsAccum = 0;
 
-    const tauUnitSec = TAU_SEC_PER_MSUN * bhMassSolar;
-    const rsKm = RS_KM_PER_MSUN * bhMassSolar;
+    const tauUnitSec = TAU_SEC_PER_MSUN * bhMassSolar;   // per fixed internal unit — growth-invariant
+    const kmPerUnit  = RS_KM_PER_MSUN * bhMassSolar;      // km per 1 three.js unit (fixed by reference mass)
+    const mBhSolarNow = bhMassSolar * massGrowthFactor;   // current (accreted) hole mass
     const stepDtPhysSec = DT * simSpeed * obsTimeRate * tauUnitSec;
     const tIscoPhysSec = T_ISCO_INTERNAL * tauUnitSec;
     const stepOverIsco = stepDtPhysSec / tIscoPhysSec;
     const elapsedPhysSec = internalTimeElapsed * tauUnitSec;
-    const diskMassSolar = bhMassSolar * diskMassFraction();
+    const diskMassSolar = mBhSolarNow * diskMassFraction();   // disk tracks the grown hole
 
     const accuracyFlag = stepOverIsco > 0.2 ? '  ⚠ integrator likely unstable near ISCO'
                         : stepOverIsco > 0.05 ? '  (visible error expected near ISCO)'
@@ -3595,15 +3793,18 @@ function animate(now) {
     const row = (k, v) => _rows.push(
       `<tr><td class="k">${k}</td><td class="v">${v}</td></tr>`);
     const u = (t) => `<span class="u">${t}</span>`;
+    // Geometry rows are labeled "r_s" but hold raw three.js coordinates. With a
+    // growing horizon, 1 unit ≠ 1 r_s, so convert to true horizon radii for display.
+    const inRs = (x) => x / RS;
 
     sec('render');
     row('frame rate',      `${fps} ${u('fps')}`);
     row('particles',       `${N}`);
-    row('b_crit',          `${B_CRIT.toFixed(2)} ${u('r_s')}`);
+    row('b_crit',          `${inRs(B_CRIT).toFixed(2)} ${u('r_s')}`);
 
     sec('camera');
-    row('r_cam',           `${camera.position.length().toFixed(2)} ${u('r_s')}`);
-    row('forbidden below', `${R_FORBID.toFixed(1)} ${u('r_s')}`);
+    row('r_cam',           `${inRs(camera.position.length()).toFixed(2)} ${u('r_s')}`);
+    row('forbidden below', `${inRs(R_FORBID).toFixed(1)} ${u('r_s')}`);
     if (camVetoed) row('state', `<span class="warn">⛔ VETO</span>`);
 
     sec('observer');
@@ -3626,15 +3827,17 @@ function animate(now) {
     }
 
     sec('geometry');
-    row('hitbox',          `${R_HITBOX.toFixed(0)} ${u('r_s')}`);
-    row('disk',            `${R_SPAWN_MIN.toFixed(1)}–${R_SPAWN_MAX.toFixed(0)} ${u('r_s')}`);
+    row('hitbox',          `${inRs(R_HITBOX).toFixed(0)} ${u('r_s')}`);
+    row('disk',            `${inRs(R_SPAWN_MIN).toFixed(1)}–${inRs(R_SPAWN_MAX).toFixed(0)} ${u('r_s')}`);
     row('inside hitbox',   `${lastInsideCount}`);
     row('avg dτ/dt there', lastAvgG.toFixed(3));
 
-    sec(`physical scale &nbsp;<span class="u">M_BH = ${formatCompact(bhMassSolar, ' M☉')}</span>`);
-    row('r_s',             formatLength(rsKm));
-    row('hitbox',          formatLength(rsKm * R_HITBOX));
-    row('disk out to',     formatLength(rsKm * R_SPAWN_MAX));
+    sec(`physical scale &nbsp;<span class="u">M_BH = ${formatCompact(mBhSolarNow, ' M☉')}</span>`);
+    if (massGrowthFactor > 1.0005)
+      row('grown',           `×${massGrowthFactor.toFixed(3)} ${u(`(from ${formatCompact(bhMassSolar, ' M☉')})`)}`);
+    row('r_s',             `${formatLength(kmPerUnit * RS)} ${u(`(${RS.toFixed(2)} units)`)}`);
+    row('hitbox',          formatLength(kmPerUnit * R_HITBOX));
+    row('disk out to',     formatLength(kmPerUnit * R_SPAWN_MAX));
     row('Δt / step',       `${formatTime(stepDtPhysSec)} ${u(`(${(stepOverIsco * 100).toFixed(2)}% T_ISCO)`)}${accuracyFlag}`);
     row('elapsed (BH proper)', formatTime(elapsedPhysSec));
 
@@ -3643,13 +3846,25 @@ function animate(now) {
     row('disk mass',       formatCompact(diskMassSolar, ' M☉'));
     row('per particle',    formatCompact(currentParticleMassKg, ' kg'));
     row('absorbed',        `${absorbedCount} ${u(`(ΔM/M = ${accretedFraction.toExponential(2)})`)}`);
-    row('safety recycles', `${safetyRecycleCount}`);
+    row('escaped', `${escapeRecycleCount}`);
     row('horizon breaches', `${horizonBreachCount}`);
     row('T_peak',          formatCompact(temp0K, ' K'));
     row('T_peak / T_edd',  formatCompact(temp0K / tEdd, ''));
 
-    sec('mass distribution');
-    row('shape extents',   `${shapeExtents[0].toFixed(1)}:${shapeExtents[1].toFixed(1)}:${shapeExtents[2].toFixed(1)} ${u('r_s')}`);
+    sec('spin (accreted)');
+    {
+      const iscoRs = inRs(iscoRadius(bhSpin));   // prograde ISCO in horizon radii
+      const dSpin = bhSpin - bhSpin0;
+      const trend = Math.abs(dSpin) < 5e-4 ? ''
+                  : dSpin > 0 ? `<span class="ok">↑ +${dSpin.toFixed(3)}</span>`
+                              : `<span class="warn">↓ ${dSpin.toFixed(3)}</span>`;
+      const nearExtremal = bhSpin >= A_STAR_MAX - 1e-4 ? ` ${u('(extremal cap)')}` : '';
+      row('a* (live)',       `${bhSpin.toFixed(3)}${nearExtremal}`);
+      row('a* set → now',    `${bhSpin0.toFixed(2)} → ${bhSpin.toFixed(3)} ${trend}`);
+      row('r_isco',          `${iscoRs.toFixed(2)} ${u('r_s')}`);
+    }
+
+    row('shape extents',   `${inRs(shapeExtents[0]).toFixed(1)}:${inRs(shapeExtents[1]).toFixed(1)}:${inRs(shapeExtents[2]).toFixed(1)} ${u('r_s')}`);
     row('sphericity',      shapeSphericity.toFixed(2));
     row('minor axis',      `(${shapeAxes[2][0].toFixed(2)}, ${shapeAxes[2][1].toFixed(2)}, ${shapeAxes[2][2].toFixed(2)})`);
     row('live frame n̂',    `(${diskNormalLive[0].toFixed(2)}, ${diskNormalLive[1].toFixed(2)}, ${diskNormalLive[2].toFixed(2)})`);
@@ -3658,13 +3873,13 @@ function animate(now) {
                              : `<span class="u">fallback: round cloud</span>`);
 
     sec('polar map');
-    row('grid',            `${PG_NR}×${PG_NPHI} ${u(`@ ${PG_R_MIN.toFixed(1)}–${PG_R_MAX.toFixed(0)} r_s`)}`);
+    row('grid',            `${PG_NR}×${PG_NPHI} ${u(`@ ${inRs(PG_R_MIN).toFixed(1)}–${inRs(PG_R_MAX).toFixed(0)} r_s`)}`);
     row('in-grid',         `${(100 * pgInGrid / Math.max(1, N)).toFixed(0)}%`);
     row('cells occupied',  `${pgOccupied}/${PG_NR * PG_NPHI}`);
     row('peak contrast',   `${pgPeakContrast.toFixed(1)}×`);
-    row('h(r) inner',      `${pgRingH[2].toFixed(2)} ${u('r_s')}`);
-    row('h(r) mid',        `${pgRingH[(PG_NR / 2) | 0].toFixed(2)} ${u('r_s')}`);
-    row('h(r) outer',      `${pgRingH[PG_NR - 3].toFixed(2)} ${u('r_s')}`);
+    row('h(r) inner',      `${inRs(pgRingH[2]).toFixed(2)} ${u('r_s')}`);
+    row('h(r) mid',        `${inRs(pgRingH[(PG_NR / 2) | 0]).toFixed(2)} ${u('r_s')}`);
+    row('h(r) outer',      `${inRs(pgRingH[PG_NR - 3]).toFixed(2)} ${u('r_s')}`);
 
     // how hard is the disk pulling on itself, compared with the hole's own
     // vertical restoring at the same height? >1 means self-gravitating.
@@ -3675,7 +3890,7 @@ function animate(now) {
       const aBH   = GM * h / (rMid * rMid * rMid);
       const mEnc  = enclosedDiskMass(rMid);
       sec('self-gravity');
-      row(`M_disk(&lt;${rMid.toFixed(0)} r_s)/M_BH`, (mEnc / GM).toFixed(3));
+      row(`M_disk(&lt;${inRs(rMid).toFixed(0)} r_s)/M_BH`, (mEnc / GM).toFixed(3));
       row('sheet / BH vertical', (aSelf / Math.max(aBH, 1e-30)).toFixed(2));
       row('settling', dragStrength > 0
             ? `${(1 / (DISK_SETTLE_ZETA * dragStrength * 2 * Math.PI)).toFixed(1)} ${u('orbits')}`
