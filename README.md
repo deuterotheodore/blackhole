@@ -22,10 +22,15 @@ The "lone star" feature draws a single star on a Kepler orbit around the BH (at 
 Not a well-developed feature, may be worth extending into a full "star disintegrates into particle cloud under tidal forces" simulation, but that's for another day.
 
 
-**Related projects (use raytracing):** 
+**Related projects** 
+There are many remarkable projects on github (which I discovered only as I was finishing mine). This is clearly a popular coding exercise; the projects listed all use full ray-tracing (it appears the time to do this has come just about now, as midrange GPUs become capable of doing this in 'almost' real time). The ashwin-r11 one is worth mentioning for combining ray-tracing with a particle-based accretion disk.
+
 - https://github.com/rossning92/Blackhole
 - https://github.com/Silvera0218/BlackHole-Simulation
-
+- https://github.com/mstits/Metal-Blackhole
+- https://github.com/RanimelAndagan/Schwarzschild-black-hole
+- https://github.com/RanimelAndagan/Schwarzschild-black-hole
+- https://github.com/ashwin-r11/Schwarzschild-RTX-Real-Time-Relativistic-Spacetime-Engine
 
 ![Screenshot](screens/slide3.jpg)
 
